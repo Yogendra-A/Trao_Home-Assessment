@@ -37,6 +37,13 @@ export function buildQuestionPrompt(
   requirements: ExtractedRequirement[],
   category: GeneratedQuestion["category"],
 ): string {
+  const compactRequirements = requirements.map((r) => ({
+    id: r.id,
+    text: r.text,
+    kind: r.kind,
+    priority: r.priority,
+  }));
+
   return `Generate interview questions for the requirements below.
 
 CATEGORY: ${category}
@@ -44,20 +51,21 @@ CATEGORY: ${category}
 Rules:
 - Use only the supplied requirements.
 - Every question must reference one or more supplied requirement IDs.
+- Cover all supplied requirements with 1-2 focused questions total.
 - Do not invent company facts, interview stages, skills, or experience.
 - Match the question to the selected category.
 - Technical questions should test relevant engineering knowledge or application.
 - Behavioural questions should ask for specific past examples.
 - System-design questions should test architecture and trade-offs where relevant.
 - Company-fit questions must use only the supplied context; if no company context is provided, focus on role motivation and work preferences without claiming company-specific facts.
-- Provide a concise answer outline, not a complete scripted answer.
+- Provide a concise answer outline without raw unescaped newlines, not a complete scripted answer.
 - Difficulty must be an integer from 1 to 3.
 - Avoid duplicate questions.
-- Return JSON only in this format:
+- Return a valid JSON object only in this format:
 {"questions":[{"requirement_ids":["r_example"],"category":"${category}","prompt":"...","answer_outline":"...","difficulty":2}]}
 
 REQUIREMENTS:
-${JSON.stringify(requirements, null, 2)}`;
+${JSON.stringify(compactRequirements)}`;
 }
 
 export async function generateQuestions(
