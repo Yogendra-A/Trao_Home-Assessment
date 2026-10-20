@@ -75,7 +75,7 @@ server/tests/                        ← 95 Vitest unit & integration tests acro
 ### 1. Prerequisites
 - Node.js 18+
 - npm or pnpm
-- (Optional) Local MongoDB or MongoDB Atlas URI (if omitted, the persistent repository fallback handles local sessions automatically)
+- MongoDB Atlas cluster or local MongoDB instance (e.g. `mongodb+srv://<username>:<password>@<cluster-host>/trao?retryWrites=true&w=majority`)
 
 ### 2. Installation
 ```bash
@@ -95,10 +95,12 @@ Edit `.env` to configure your LLM provider and database:
 LLM_BASE_URL=https://api.groq.com/openai/v1
 LLM_API_KEY=your_llm_api_key_here
 LLM_MODEL=openai/gpt-oss-20b
-MONGODB_URI=mongodb://localhost:27017/trao
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-host>/trao?retryWrites=true&w=majority
 SESSION_SECRET=a-secure-random-secret-key-with-at-least-32-characters
 ALLOW_PRIVATE_URLS=true
 ```
+
+> **Note on Persistence**: When running with `NODE_ENV=production`, `MONGODB_URI` is required and connection failure will immediately throw an operational error without falling back to temporary in-memory storage. In development or test environments without `MONGODB_URI`, the repository safely uses an in-memory fallback store for rapid isolated testing.
 
 ### 3. Start Development Server
 ```bash
@@ -247,9 +249,9 @@ Run the complete test suite:
 npm test
 ```
 
-### Current Status: 95/95 tests passing across 14 test files:
+### Current Status: 105/105 tests passing across 14 test files:
 - `server/tests/schedule.test.ts` (6 tests): Requested day count, integer minutes, front-loading harder material, must-have coverage.
-- `server/tests/auth-and-persistence.test.ts` (10 tests): bcrypt hashing, token signing/verification, duplicate email rejection, cross-user authorization, ownership isolation, edit persistence.
+- `server/tests/auth-and-persistence.test.ts` (20 tests): bcrypt hashing, token signing/verification, duplicate email rejection, cross-user authorization, ownership isolation, edit persistence, practice mode progress and confidence persistence, MongoDB Atlas connection pooling, URI credential sanitization, production safeguards without silent in-memory fallback, and configuration integrity.
 - `server/tests/schema.test.ts` (9 tests): Appendix A exact schema, difficulty range, integer durations, referential integrity, duplicate ID rejection.
 - `server/tests/evaluate-cli.test.ts` (5 tests): Error classification (`COMPANY_UNREACHABLE`, `URL_REJECTED`, `COVERAGE_FAILED`).
 - `server/tests/coverage.test.ts` (5 tests): Deterministic coverage checks.
@@ -269,13 +271,13 @@ npm test
 
 ### Deploying to Vercel / Render / Fly.io:
 1. Connect your repository to your hosting provider.
-2. In the hosting dashboard, configure the Environment Variables:
+2. In the hosting provider's dashboard, configure the Environment Variables:
    - `LLM_BASE_URL` (e.g. `https://api.groq.com/openai/v1`)
    - `LLM_API_KEY` (your LLM provider API key)
    - `LLM_MODEL` (e.g. `openai/gpt-oss-20b`)
-   - `MONGODB_URI` (your MongoDB Atlas connection string, e.g. `mongodb+srv://user:pass@cluster.mongodb.net/trao?retryWrites=true&w=majority`)
+   - `MONGODB_URI` (**Required in production**: your MongoDB Atlas connection string, e.g. `mongodb+srv://<username>:<password>@<cluster-host>/trao?retryWrites=true&w=majority`)
    - `SESSION_SECRET` (random 32+ character string)
    - `NODE_ENV=production`
 3. Build Command: `npm run build`
 4. Start Command: `npm start`
-5. Health Check: Navigate to `/api/health` to verify server uptime and database connectivity.
+5. Health Check: Navigate to `/api/health` to verify server uptime and database connectivity (executes a live `ping` command against the configured database; returns HTTP 503 if unavailable in production).

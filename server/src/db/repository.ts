@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { Db } from "mongodb";
 import { getDb } from "./client";
 import type { UserRecord, KitRecord } from "./models";
 import type { InterviewKit } from "../../../shared/schemas/kit";
 
-// In-memory fallback stores for when MongoDB is not running or during local tests
+// In-memory fallback stores for when MongoDB is not running or during local unit tests
 const fallbackUsers = new Map<string, UserRecord>();
 const fallbackKits = new Map<string, KitRecord>();
 
@@ -11,6 +12,34 @@ export class RepositoryError extends Error {
   constructor(message: string, public code: string) {
     super(message);
     this.name = "RepositoryError";
+  }
+}
+
+function assertProductionDb(db: unknown): void {
+  if (!db && process.env.NODE_ENV === "production") {
+    throw new RepositoryError(
+      "Database service is unavailable in production.",
+      "DATABASE_UNAVAILABLE",
+    );
+  }
+}
+
+async function getActiveDb(): Promise<Db | null> {
+  try {
+    const db = await getDb();
+    assertProductionDb(db);
+    return db;
+  } catch (error) {
+    if (error instanceof RepositoryError) {
+      throw error;
+    }
+    if (process.env.NODE_ENV === "production") {
+      throw new RepositoryError(
+        "Database service is unavailable in production.",
+        "DATABASE_UNAVAILABLE",
+      );
+    }
+    return null;
   }
 }
 
@@ -23,7 +52,7 @@ export async function createUser(
   passwordHash: string,
 ): Promise<UserRecord> {
   const normalizedEmail = email.toLowerCase().trim();
-  const db = await getDb();
+  const db = await getActiveDb();
 
   const user: UserRecord = {
     id: `usr_${randomUUID()}`,
@@ -50,7 +79,7 @@ export async function createUser(
     }
   }
 
-  // Fallback
+  // Fallback (only in non-production)
   for (const existing of fallbackUsers.values()) {
     if (existing.email === normalizedEmail) {
       throw new RepositoryError("A user with this email already exists.", "USER_EXISTS");
@@ -63,7 +92,7 @@ export async function createUser(
 
 export async function findUserByEmail(email: string): Promise<UserRecord | null> {
   const normalizedEmail = email.toLowerCase().trim();
-  const db = await getDb();
+  const db = await getActiveDb();
 
   if (db) {
     const doc = await db.collection("users").findOne({ email: normalizedEmail });
@@ -76,6 +105,7 @@ export async function findUserByEmail(email: string): Promise<UserRecord | null>
     };
   }
 
+  // Fallback (only in non-production)
   for (const user of fallbackUsers.values()) {
     if (user.email === normalizedEmail) {
       return user;
@@ -86,7 +116,7 @@ export async function findUserByEmail(email: string): Promise<UserRecord | null>
 }
 
 export async function findUserById(id: string): Promise<UserRecord | null> {
-  const db = await getDb();
+  const db = await getActiveDb();
 
   if (db) {
     const doc = await db.collection("users").findOne({
@@ -112,7 +142,8 @@ export async function saveKit(
   userId: string,
   kit: InterviewKit,
 ): Promise<KitRecord> {
-  const db = await getDb();
+  const db = await getActiveDb();
+
   const now = new Date().toISOString();
 
   const record: KitRecord = {
@@ -146,7 +177,7 @@ export async function saveKit(
 export async function listUserKits(
   userId: string,
 ): Promise<Array<Pick<KitRecord, "id" | "title" | "company" | "status" | "createdAt" | "updatedAt">>> {
-  const db = await getDb();
+  const db = await getActiveDb();
 
   if (db) {
     const docs = await db
@@ -189,14 +220,14 @@ export async function getKitById(
   kitId: string,
   userId: string,
 ): Promise<KitRecord | null> {
-  const db = await getDb();
+  const db = await getActiveDb();
 
   if (db) {
     const doc = await db.collection("kits").findOne({
       $or: [{ id: kitId }, { _id: kitId as any }],
     });
     if (!doc) return null;
-    // Enforce strict ownership check
+    // Strict user ownership enforcement
     if (doc.userId !== userId) {
       return null;
     }
@@ -229,7 +260,8 @@ export async function updateKit(
   userId: string,
   update: Partial<Omit<KitRecord, "id" | "userId" | "createdAt">>,
 ): Promise<KitRecord | null> {
-  const db = await getDb();
+  const db = await getActiveDb();
+
   const now = new Date().toISOString();
 
   if (db) {
@@ -272,7 +304,7 @@ export async function deleteKit(
   kitId: string,
   userId: string,
 ): Promise<boolean> {
-  const db = await getDb();
+  const db = await getActiveDb();
 
   if (db) {
     const result = await db.collection("kits").deleteOne({

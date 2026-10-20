@@ -1,64 +1,105 @@
 import { MongoClient, Db } from "mongodb";
 
-let client: MongoClient | null = null;
-let clientPromise: Promise<MongoClient | null> | null = null;
-let isMongoAvailable: boolean | null = null;
+export const DB_NAME = process.env.MONGODB_DB_NAME || "trao";
+
+declare global {
+  // eslint-disable-next-line no-var
+  var _mongoClientPromise: Promise<MongoClient | null> | undefined;
+  // eslint-disable-next-line no-var
+  var _mongoIndexesEnsured: boolean | undefined;
+}
+
+export function sanitizeUri(uri: string): string {
+  return uri.replace(/\/\/[^:]+:[^@]+@/, "//***:***@");
+}
 
 export async function getMongoClient(): Promise<MongoClient | null> {
+  if (global._mongoClientPromise) {
+    return global._mongoClientPromise;
+  }
+
   const uri = process.env.MONGODB_URI;
+  const isProd = process.env.NODE_ENV === "production";
+
   if (!uri) {
-    isMongoAvailable = false;
+    if (isProd) {
+      throw new Error("MONGODB_URI environment variable is required in production.");
+    }
     return null;
   }
 
-  if (isMongoAvailable === false) {
-    return null;
-  }
+  const sanitized = sanitizeUri(uri);
 
-  if (client) {
-    return client;
-  }
-
-  if (!clientPromise) {
-    const mongoClient = new MongoClient(uri, {
+  let client: MongoClient;
+  try {
+    client = new MongoClient(uri, {
       maxPoolSize: 10,
       minPoolSize: 2,
-      serverSelectionTimeoutMS: 2000,
-      connectTimeoutMS: 2000,
+      serverSelectionTimeoutMS: 8000,
+      connectTimeoutMS: 8000,
     });
-
-    clientPromise = mongoClient.connect().then(
-      async (connectedClient) => {
-        client = connectedClient;
-        isMongoAvailable = true;
-        await ensureIndexes(client.db());
-        return client;
-      },
-      (error) => {
-        console.warn(
-          `[Database] MongoDB connection to ${uri.replace(/\/\/[^:]+:[^@]+@/, "//***:***@")} failed: ${error instanceof Error ? error.message : String(error)}. Operating in fallback persistent repository mode.`,
-        );
-        isMongoAvailable = false;
-        client = null;
-        clientPromise = null;
-        return null;
-      },
+  } catch (error) {
+    const sanitizedMsg = error instanceof Error ? error.message.replace(/\/\/[^:]+:[^@]+@/, "//***:***@") : String(error);
+    console.error(
+      `[Database] Connection to ${sanitized} failed: ${sanitizedMsg}`,
     );
+    if (isProd) {
+      throw new Error("Failed to connect to MongoDB Atlas in production.");
+    }
+    return null;
   }
 
-  return clientPromise;
+  const promise = client.connect().then(
+    async (connectedClient) => {
+      await ensureIndexes(connectedClient.db(DB_NAME));
+      return connectedClient;
+    },
+    (error) => {
+      const sanitizedMsg = error instanceof Error ? error.message.replace(/\/\/[^:]+:[^@]+@/, "//***:***@") : String(error);
+      console.error(
+        `[Database] Connection to ${sanitized} failed: ${sanitizedMsg}`,
+      );
+      global._mongoClientPromise = undefined;
+
+      if (isProd) {
+        throw new Error("Failed to connect to MongoDB Atlas in production.");
+      }
+      return null;
+    },
+  );
+
+  global._mongoClientPromise = promise;
+  return promise;
 }
 
 export async function getDb(): Promise<Db | null> {
-  const c = await getMongoClient();
-  return c ? c.db() : null;
+  const client = await getMongoClient();
+  return client ? client.db(DB_NAME) : null;
+}
+
+export async function closeDbConnection(): Promise<void> {
+  if (global._mongoClientPromise) {
+    try {
+      const client = await global._mongoClientPromise;
+      if (client) {
+        await client.close();
+      }
+    } catch {
+      // ignore
+    } finally {
+      global._mongoClientPromise = undefined;
+      global._mongoIndexesEnsured = undefined;
+    }
+  }
 }
 
 async function ensureIndexes(db: Db): Promise<void> {
+  if (global._mongoIndexesEnsured) return;
   try {
     await db.collection("users").createIndex({ email: 1 }, { unique: true });
-    await db.collection("kits").createIndex({ userId: 1, createdAt: -1 });
+    await db.collection("kits").createIndex({ userId: 1, updatedAt: -1 });
+    global._mongoIndexesEnsured = true;
   } catch (err) {
-    console.error("[Database] Error ensuring indexes:", err);
+    console.error("[Database] Error ensuring indexes:", err instanceof Error ? err.message : String(err));
   }
 }
