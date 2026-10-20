@@ -1,4 +1,3 @@
-
 import { describe, expect, it } from "vitest";
 import { InterviewKitSchema } from "../../shared/schemas/kit";
 
@@ -114,5 +113,63 @@ describe("InterviewKitSchema", () => {
 
     expect(InterviewKitSchema.safeParse(invalidKit).success).toBe(false);
   });
-});
 
+  it("rejects schedule referencing a non-existent question ID", () => {
+    const invalidKit = {
+      ...validKit,
+      schedule: {
+        ...validKit.schedule,
+        days: [
+          {
+            ...validKit.schedule.days[0],
+            question_ids: ["q_does_not_exist"],
+          },
+          validKit.schedule.days[1],
+        ],
+      },
+    };
+
+    expect(InterviewKitSchema.safeParse(invalidKit).success).toBe(false);
+  });
+
+  it("rejects questions referencing a non-existent requirement ID", () => {
+    const invalidKit = {
+      ...validKit,
+      questions: [
+        {
+          ...validKit.questions[0],
+          requirement_ids: ["r_unknown"],
+        },
+      ],
+    };
+
+    expect(InterviewKitSchema.safeParse(invalidKit).success).toBe(false);
+  });
+
+  it("rejects duplicate requirement IDs", () => {
+    const invalidKit = {
+      ...validKit,
+      role: {
+        ...validKit.role,
+        requirements: [
+          { id: "r1", text: "Req 1", kind: "technical", priority: "must" },
+          { id: "r1", text: "Req 2", kind: "domain", priority: "nice" },
+        ],
+      },
+    };
+
+    expect(InterviewKitSchema.safeParse(invalidKit).success).toBe(false);
+  });
+
+  it("rejects schedule day count not matching days_available", () => {
+    const invalidKit = {
+      ...validKit,
+      schedule: {
+        days_available: 3,
+        days: validKit.schedule.days, // length 2
+      },
+    };
+
+    expect(InterviewKitSchema.safeParse(invalidKit).success).toBe(false);
+  });
+});

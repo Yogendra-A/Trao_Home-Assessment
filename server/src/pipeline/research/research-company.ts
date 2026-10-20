@@ -1,5 +1,5 @@
-
 import { crawlCompany } from "./crawl-company";
+import { searchPublicDiscussions } from "./search-discussions";
 
 export interface ResearchEvidence {
   url: string;
@@ -52,6 +52,16 @@ function scoreEvidence(url: string, title: string, text: string): number {
   return score;
 }
 
+function extractCompanyName(url: string): string {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+    const name = hostname.split(".")[0];
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  } catch {
+    return "";
+  }
+}
+
 export async function researchCompany(
   companyUrl: string,
 ): Promise<CompanyResearchResult> {
@@ -66,24 +76,46 @@ export async function researchCompany(
     }))
     .sort((a, b) => b.relevance - a.relevance);
 
+  // Search public discussion forums (e.g. Hacker News / developer forums) for interview process insights
+  const companyName = extractCompanyName(companyUrl);
+  let discussionEvidence: ResearchEvidence[] = [];
+
+  if (companyName) {
+    try {
+      const publicSearch = await searchPublicDiscussions(companyName);
+      discussionEvidence = publicSearch.discussions.map((d) => ({
+        url: d.url,
+        title: d.title,
+        text: d.snippet,
+        relevance: 9,
+      }));
+    } catch {
+      // Keep going if public discussion search fails
+    }
+  }
+
+  const combinedEvidence = [...evidence, ...discussionEvidence].sort(
+    (a, b) => b.relevance - a.relevance,
+  );
+
   const select = (minimumScore: number, limit: number) =>
-    evidence.filter((item) => item.relevance >= minimumScore).slice(0, limit);
+    combinedEvidence.filter((item) => item.relevance >= minimumScore).slice(0, limit);
+
+  const hiringFromCrawl = evidence.filter((item) =>
+    /interview|hiring|career|recruitment|jobs|how-we-hire/i.test(
+      `${item.url} ${item.title}`,
+    ),
+  );
 
   return {
     companyUrl,
-    evidence,
-    sourcesFetched: crawl.pages.length,
+    evidence: combinedEvidence,
+    sourcesFetched: crawl.pages.length + discussionEvidence.length,
     skipped: crawl.skipped,
     findings: {
       companyOverviewSources: select(5, 5),
-      hiringProcessSources: evidence
-        .filter((item) =>
-          /interview|hiring|career|recruitment|jobs|how-we-hire/i.test(
-            `${item.url} ${item.title}`,
-          ),
-        )
-        .slice(0, 5),
-      engineeringSources: evidence
+      hiringProcessSources: [...hiringFromCrawl, ...discussionEvidence].slice(0, 5),
+      engineeringSources: combinedEvidence
         .filter((item) =>
           /engineering|technology|developer|technical/i.test(
             `${item.url} ${item.title}`,

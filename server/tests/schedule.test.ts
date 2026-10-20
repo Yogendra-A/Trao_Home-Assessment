@@ -1,4 +1,3 @@
-
 import { describe, expect, it } from "vitest";
 import { allocateSchedule } from "../src/pipeline/generation/schedule";
 import type { Question, Requirement } from "../../shared/schemas/kit";
@@ -72,6 +71,41 @@ describe("allocateSchedule", () => {
 
     expect(coveredIds.has("r1")).toBe(true);
     expect(coveredIds.has("r2")).toBe(true);
+  });
+
+  it("places harder and higher-priority material on earlier days", () => {
+    const mixedRequirements: Requirement[] = [
+      { id: "r1", text: "React", kind: "technical", priority: "must" },
+      { id: "r2", text: "Nice CSS", kind: "technical", priority: "nice" },
+    ];
+
+    const mixedQuestions: Question[] = [
+      {
+        id: "q_nice_easy",
+        requirement_ids: ["r2"],
+        category: "technical",
+        prompt: "CSS question",
+        answer_outline: "Answer",
+        difficulty: 1,
+      },
+      {
+        id: "q_must_hard",
+        requirement_ids: ["r1"],
+        category: "technical",
+        prompt: "React concurrency",
+        answer_outline: "Answer",
+        difficulty: 3,
+      },
+    ];
+
+    const schedule = allocateSchedule({
+      daysAvailable: 2,
+      requirements: mixedRequirements,
+      questions: mixedQuestions,
+    });
+
+    expect(schedule.days[0].question_ids).toContain("q_must_hard");
+    expect(schedule.days[1].question_ids).toContain("q_nice_easy");
   });
 
   it("rejects an invalid number of days", () => {

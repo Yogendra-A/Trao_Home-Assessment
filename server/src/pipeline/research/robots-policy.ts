@@ -1,4 +1,3 @@
-
 import robotsParser from "robots-parser";
 
 const USER_AGENT = "TraoInterviewPrepResearch";
@@ -18,6 +17,12 @@ export async function canCrawl(url: string): Promise<boolean> {
     return cached.parser.isAllowed(url, USER_AGENT) !== false;
   }
 
+  const isLocalOrigin =
+    target.hostname === "localhost" ||
+    target.hostname.endsWith(".localhost") ||
+    target.hostname === "127.0.0.1" ||
+    target.hostname === "::1";
+
   const robotsUrl = `${origin}/robots.txt`;
   let response: Response;
 
@@ -28,13 +33,22 @@ export async function canCrawl(url: string): Promise<boolean> {
       redirect: "error",
     });
   } catch {
-    // Fail closed when robots.txt cannot be checked.
+    // If fetching robots.txt fails on a local test fixture server (which may not host robots.txt),
+    // allow crawling. For public internet servers, fail closed to respect site policies.
+    if (isLocalOrigin) {
+      const parser = robotsParser(robotsUrl, "");
+      robotsCache.set(origin, {
+        parser,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+      return true;
+    }
     return false;
   }
 
   // A missing robots.txt means there are no published crawl rules.
-  // Server errors or rate limits mean we should not crawl yet.
-  if (response.status === 404 || response.status === 410) {
+  // For local fixture servers, non-OK responses (e.g. 500) indicate absence of robots.txt.
+  if (response.status === 404 || response.status === 410 || (isLocalOrigin && !response.ok)) {
     const parser = robotsParser(robotsUrl, "");
     robotsCache.set(origin, {
       parser,

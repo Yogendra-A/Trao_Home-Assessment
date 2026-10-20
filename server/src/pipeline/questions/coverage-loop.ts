@@ -1,9 +1,9 @@
-
 import type { ExtractedRequirement } from "../requirements/extract";
 import {
   generateQuestions,
   type GeneratedQuestion,
   type QuestionGenerator,
+  type ResearchContext,
 } from "./generate";
 
 export interface CoverageResult {
@@ -27,6 +27,7 @@ export async function generateWithCoverage(
   requirements: ExtractedRequirement[],
   generate: QuestionGenerator,
   maxPasses = 2,
+  researchContext?: ResearchContext,
 ): Promise<CoverageResult> {
   if (!Number.isInteger(maxPasses) || maxPasses < 1 || maxPasses > 3) {
     throw new Error("maxPasses must be an integer between 1 and 3.");
@@ -50,7 +51,7 @@ export async function generateWithCoverage(
         ? requirements
         : requirements.filter((r) => uncoveredIds.includes(r.id));
 
-    const generated = await generateQuestions(targetRequirements, generate);
+    const generated = await generateQuestions(targetRequirements, generate, researchContext);
 
     const existingIds = new Set(questions.map((q) => q.id));
     questions.push(...generated.filter((q) => !existingIds.has(q.id)));

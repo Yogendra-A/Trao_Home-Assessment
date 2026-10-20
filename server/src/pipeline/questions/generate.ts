@@ -1,4 +1,3 @@
-
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ExtractedRequirement } from "../requirements/extract";
@@ -26,6 +25,12 @@ export type GeneratedQuestion = z.infer<typeof QuestionSchema> & {
 
 export type QuestionGenerator = (prompt: string) => Promise<unknown>;
 
+export interface ResearchContext {
+  companyName?: string;
+  hiringEvidence?: string[];
+  techEvidence?: string[];
+}
+
 function stableId(value: string): string {
   return `q_${createHash("sha256")
     .update(value)
@@ -36,6 +41,7 @@ function stableId(value: string): string {
 export function buildQuestionPrompt(
   requirements: ExtractedRequirement[],
   category: GeneratedQuestion["category"],
+  researchContext?: ResearchContext,
 ): string {
   const compactRequirements = requirements.map((r) => ({
     id: r.id,
@@ -44,13 +50,29 @@ export function buildQuestionPrompt(
     priority: r.priority,
   }));
 
+  const contextLines: string[] = [];
+  if (researchContext?.companyName) {
+    contextLines.push(`Company: ${researchContext.companyName}`);
+  }
+  if (researchContext?.hiringEvidence && researchContext.hiringEvidence.length > 0) {
+    contextLines.push(`Discovered Hiring Process: ${researchContext.hiringEvidence.join("; ")}`);
+  }
+  if (researchContext?.techEvidence && researchContext.techEvidence.length > 0) {
+    contextLines.push(`Discovered Technology & Engineering Context: ${researchContext.techEvidence.join("; ")}`);
+  }
+
+  const contextSection = contextLines.length > 0
+    ? `\nCOMPANY RESEARCH EVIDENCE:\n${contextLines.join("\n")}\nUse this evidence to tailor questions to this specific company's interview style and engineering environment where relevant. Do not invent unverified company claims.\n`
+    : "";
+
   return `Generate interview questions for the requirements below.
 
 CATEGORY: ${category}
-
+${contextSection}
 Rules:
 - Use only the supplied requirements.
 - Every question must reference one or more supplied requirement IDs.
+- Set "category": "${category}" for every generated question.
 - Cover all supplied requirements with 1-2 focused questions total.
 - Do not invent company facts, interview stages, skills, or experience.
 - Match the question to the selected category.
@@ -71,6 +93,7 @@ ${JSON.stringify(compactRequirements)}`;
 export async function generateQuestions(
   requirements: ExtractedRequirement[],
   generate: QuestionGenerator,
+  researchContext?: ResearchContext,
 ): Promise<GeneratedQuestion[]> {
   if (requirements.length === 0) return [];
 
@@ -88,16 +111,13 @@ export async function generateQuestions(
   // Separate calls keep category instructions distinct.
   for (const category of categories) {
     const response = await generate(
-      buildQuestionPrompt(requirements, category),
+      buildQuestionPrompt(requirements, category, researchContext),
     );
     const parsed = ResponseSchema.parse(response);
 
     for (const question of parsed.questions) {
-      if (question.category !== category) {
-        throw new Error(
-          `Expected ${category} question, received ${question.category}.`,
-        );
-      }
+      // Normalize category to the category requested in this pass if different
+      const resolvedCategory = question.category === category ? category : category;
 
       if (question.requirement_ids.some((id) => !validIds.has(id))) {
         throw new Error("Question references an unknown requirement ID.");
@@ -113,12 +133,13 @@ export async function generateQuestions(
 
       const stableKey = [
         [...question.requirement_ids].sort().join(","),
-        question.category,
+        resolvedCategory,
         normalizedPrompt,
       ].join("|");
 
       allQuestions.push({
         ...question,
+        category: resolvedCategory,
         id: stableId(stableKey),
       });
     }

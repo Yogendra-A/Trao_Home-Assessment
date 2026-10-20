@@ -1,4 +1,3 @@
-
 import { lookup } from "node:dns/promises";
 import ipaddr from "ipaddr.js";
 
@@ -58,8 +57,11 @@ export async function validateResearchUrl(
     process.env.NODE_ENV !== "production" &&
     process.env.ALLOW_PRIVATE_URLS === "true";
 
-  if (isLocalHostname && !allowLocal) {
-    throw new UrlPolicyError("Localhost URLs are not allowed.");
+  if (isLocalHostname) {
+    if (!allowLocal) {
+      throw new UrlPolicyError("Localhost URLs are not allowed.");
+    }
+    return url;
   }
 
   if (ipaddr.isValid(hostname)) {

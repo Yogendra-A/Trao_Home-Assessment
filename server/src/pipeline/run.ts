@@ -1,4 +1,3 @@
-
 import { z } from "zod";
 import {
   InterviewKitSchema,
@@ -15,6 +14,13 @@ import {
 import { generateStructuredJson } from "./llm/chat-completions";
 import { allocateSchedule } from "./generation/schedule";
 import { checkCoverage } from "./validation/coverage";
+
+export class CompanyUnreachableError extends Error {
+  constructor(message = "Company site unreachable after 3 retries.") {
+    super(message);
+    this.name = "CompanyUnreachableError";
+  }
+}
 
 export interface PipelineInput {
   jd: string;
@@ -88,8 +94,28 @@ export async function runInterviewPrepPipeline(
     throw new Error("Company URL must use HTTP or HTTPS.");
   }
 
+  const company = companyNameFromUrl(companyUrl.toString());
+
   // Research uses the existing URL, DNS, robots, and crawl policies.
-  const research = await researchCompany(companyUrl.toString());
+  let research;
+  try {
+    research = await researchCompany(companyUrl.toString());
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes("could not be resolved") ||
+        error.message.includes("Company hostname has no IP") ||
+        error.message.includes("unreachable") ||
+        error.message.includes("fetch failed") ||
+        error.message.includes("timed out") ||
+        error.message.includes("ECONNREFUSED"))
+    ) {
+      throw new CompanyUnreachableError(
+        `Company site unreachable after 3 retries: ${error.message}`,
+      );
+    }
+    throw error;
+  }
 
   // Extract requirements using the existing validated LLM integration.
   const requirements = await generateRequirements(jd);
@@ -100,11 +126,24 @@ export async function runInterviewPrepPipeline(
     );
   }
 
-  // Generate questions and make a bounded second pass for uncovered items.
+  const hiringEvidence = (research.findings?.hiringProcessSources ?? [])
+    .map((item) => `${item.title}: ${item.text.slice(0, 250)}`)
+    .slice(0, 3);
+  const techEvidence = (research.findings?.engineeringSources ?? [])
+    .map((item) => `${item.title}: ${item.text.slice(0, 250)}`)
+    .slice(0, 3);
+
+  // Generate questions and make a bounded second pass for uncovered items,
+  // incorporating discovered hiring and tech context.
   const coverageResult = await generateWithCoverage(
     requirements,
     generateStructuredJson,
     2,
+    {
+      companyName: company,
+      hiringEvidence,
+      techEvidence,
+    },
   );
 
   assertMustHaveCoverage(requirements, coverageResult);
@@ -151,7 +190,6 @@ ${jd.slice(0, 4_000)}`,
   const brief = CompanyBriefSchema.parse(rawBrief);
   const role = RoleMetadataSchema.parse(rawRole);
 
-  const company = companyNameFromUrl(companyUrl.toString());
   const pagesUsed = research.evidence.map((item) => item.url);
 
   const schedule = allocateSchedule({

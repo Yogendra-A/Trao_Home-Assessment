@@ -1,4 +1,3 @@
-
 import type { InterviewKit, Question } from "../../../../shared/schemas/kit";
 
 export interface ScheduleInput {
@@ -32,15 +31,23 @@ export function allocateSchedule(input: ScheduleInput): InterviewKit["schedule"]
     return priority(a) - priority(b) || b.difficulty - a.difficulty || a.id.localeCompare(b.id);
   });
 
-  // Round-robin assignment balances questions across the requested days.
+  // Sequential block allocation ensures harder and higher-priority topics appear earlier,
+  // leaving later days for lighter topics, consolidation, or review.
   const assigned: Question[][] = Array.from(
     { length: daysAvailable },
     () => [],
   );
 
-  ordered.forEach((question, index) => {
-    assigned[index % daysAvailable].push(question);
-  });
+  let qIndex = 0;
+  for (let dayIndex = 0; dayIndex < daysAvailable; dayIndex++) {
+    const remainingDays = daysAvailable - dayIndex;
+    const remainingQuestions = ordered.length - qIndex;
+    const countForDay = Math.ceil(remainingQuestions / remainingDays);
+
+    for (let c = 0; c < countForDay && qIndex < ordered.length; c++) {
+      assigned[dayIndex].push(ordered[qIndex++]);
+    }
+  }
 
   const days = assigned.map((dayQuestions, index) => {
     const mustTopics = new Set<string>();
