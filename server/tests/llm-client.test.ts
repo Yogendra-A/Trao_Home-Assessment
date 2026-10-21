@@ -221,6 +221,31 @@ describe("redactSecrets and extractProviderError helpers", () => {
     expect(extracted.message).not.toContain("secret-123");
     expect(extracted.message).not.toContain("secret-tok");
   });
+
+  it("redacts MongoDB connection strings and SESSION_SECRET from diagnostic output", async () => {
+    const { redactSecrets } = await import("../src/pipeline/llm/chat-completions");
+
+    vi.stubEnv("SESSION_SECRET", "super-secret-production-session-key-32chars");
+
+    const raw1 =
+      "Connection failed to mongodb+srv://app_user:s3cr3tP@ssw0rd!@cluster0.abcde.mongodb.net/trao_prod";
+    const redacted1 = redactSecrets(raw1);
+    expect(redacted1).not.toContain("s3cr3tP@ssw0rd!");
+    expect(redacted1).not.toContain("app_user");
+    expect(redacted1).toContain("mongodb+srv://[REDACTED]@cluster0.abcde.mongodb.net/trao_prod");
+
+    const raw2 =
+      "Standard URI: mongodb://db_user:my_admin_pass@127.0.0.1:27017/trao?authSource=admin";
+    const redacted2 = redactSecrets(raw2);
+    expect(redacted2).not.toContain("my_admin_pass");
+    expect(redacted2).not.toContain("db_user");
+    expect(redacted2).toContain("mongodb://[REDACTED]@127.0.0.1:27017/trao?authSource=admin");
+
+    const raw3 = "Leaked secret: super-secret-production-session-key-32chars in log message";
+    const redacted3 = redactSecrets(raw3);
+    expect(redacted3).not.toContain("super-secret-production-session-key-32chars");
+    expect(redacted3).toContain("[REDACTED]");
+  });
 });
 
 describe("parseRetryDelay", () => {
@@ -426,9 +451,10 @@ describe("Structured output resilience and schema validation", () => {
     const firstCallBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(firstCallBody.response_format).toEqual({ type: "json_object" });
 
-    // Verify second attempt dropped response_format as fallback
+    // Verify second attempt dropped response_format as fallback and scaled token budget
     const secondCallBody = JSON.parse(mockFetch.mock.calls[1][1].body);
     expect(secondCallBody.response_format).toBeUndefined();
+    expect(secondCallBody.max_completion_tokens).toBe(2700);
 
     consoleSpy.mockRestore();
     warnSpy.mockRestore();
@@ -462,6 +488,118 @@ describe("Structured output resilience and schema validation", () => {
       role: "Backend Engineer",
       skills: ["Go", "Kubernetes"],
     });
+  });
+
+  it("directly recovers valid schema JSON from provider failed_generation on HTTP 400", async () => {
+    vi.stubEnv("LLM_BASE_URL", "https://llm.example/v1");
+    vi.stubEnv("LLM_API_KEY", "test-key");
+    vi.stubEnv("LLM_MODEL", "openai/gpt-oss-20b");
+
+    const { z } = await import("zod");
+    const TargetSchema = z.object({
+      role: z.string(),
+      years: z.number(),
+    });
+
+    const mockFetch = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: {
+            message:
+              "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+            type: "invalid_request_error",
+            code: "json_validate_failed",
+            failed_generation: "```json\n{\"role\":\"Staff Engineer\",\"years\":8}\n```",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await generateStructuredJson("Get role", {
+      schema: TargetSchema,
+      stage: "requirements_extraction",
+    });
+
+    expect(result).toEqual({ role: "Staff Engineer", years: 8 });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs truncated JSON responses using repairTruncatedJson", async () => {
+    const { repairTruncatedJson } = await import("../src/pipeline/llm/chat-completions");
+
+    // Case 1: Unclosed braces
+    const truncatedObject = '{"text": "Python programming", "kind": "technical", "priority": "must"';
+    expect(repairTruncatedJson(truncatedObject)).toEqual({
+      text: "Python programming",
+      kind: "technical",
+      priority: "must",
+    });
+
+    // Case 2: Incomplete array of objects truncated mid-second item
+    const truncatedArray =
+      '{"requirements": [{"text": "Python", "kind": "technical", "priority": "must"}, {"text": "Dock';
+    expect(repairTruncatedJson(truncatedArray)).toEqual({
+      requirements: [{ text: "Python", kind: "technical", priority: "must" }],
+    });
+
+    // Case 3: Trailing comma before abrupt cutoff
+    const trailingComma =
+      '{"requirements": [{"text": "Python", "kind": "technical", "priority": "must"},';
+    expect(repairTruncatedJson(trailingComma)).toEqual({
+      requirements: [{ text: "Python", kind: "technical", priority: "must" }],
+    });
+
+    // Case 4: Unclosed markdown code fence
+    const unclosedFence =
+      '```json\n{"requirements": [{"text": "Python", "kind": "technical", "priority": "must"}]';
+    expect(repairTruncatedJson(unclosedFence)).toEqual({
+      requirements: [{ text: "Python", kind: "technical", priority: "must" }],
+    });
+  });
+
+  it("recovers from truncated JSON completion in generateStructuredJson", async () => {
+    vi.stubEnv("LLM_BASE_URL", "https://llm.example/v1");
+    vi.stubEnv("LLM_API_KEY", "test-key");
+    vi.stubEnv("LLM_MODEL", "openai/gpt-oss-20b");
+
+    const { z } = await import("zod");
+    const TargetSchema = z.object({
+      requirements: z.array(
+        z.object({
+          text: z.string(),
+          kind: z.string(),
+        }),
+      ),
+    });
+
+    const truncatedContent =
+      '{"requirements": [{"text": "Docker containerization", "kind": "technical"}, {"text": "Kuber';
+
+    const mockFetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: truncatedContent }, finish_reason: "length" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await generateStructuredJson("Extract requirements", {
+      schema: TargetSchema,
+      stage: "requirements_extraction",
+    });
+
+    expect(result).toEqual({
+      requirements: [{ text: "Docker containerization", kind: "technical" }],
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("retries when response fails Zod schema validation and recovers on subsequent attempt", async () => {

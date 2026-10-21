@@ -290,6 +290,121 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function repairTruncatedJson(content: string): unknown | null {
+  let text = content.trim();
+
+  // Strip unclosed markdown codeblock if present
+  if (text.startsWith("```")) {
+    text = text.replace(/^```(?:json)?\s*/i, "");
+    const closingFence = text.lastIndexOf("```");
+    if (closingFence !== -1) {
+      text = text.slice(0, closingFence).trim();
+    }
+  }
+
+  // Find start of JSON object or array
+  const firstBrace = text.indexOf("{");
+  const firstBracket = text.indexOf("[");
+  let startIndex = -1;
+  if (firstBrace !== -1 && firstBracket !== -1) {
+    startIndex = Math.min(firstBrace, firstBracket);
+  } else {
+    startIndex = Math.max(firstBrace, firstBracket);
+  }
+
+  if (startIndex === -1) {
+    return null;
+  }
+
+  text = text.slice(startIndex).trim();
+
+  // Try direct parse first in case it's already valid
+  try {
+    return JSON.parse(text);
+  } catch {
+    // continue to repair
+  }
+
+  const tryClose = (candidate: string): unknown | null => {
+    let inStr = false;
+    let esc = false;
+    const stack: { char: string; index: number }[] = [];
+
+    for (let i = 0; i < candidate.length; i++) {
+      const char = candidate[i];
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (char === "\\") {
+        esc = true;
+        continue;
+      }
+      if (char === '"') {
+        inStr = !inStr;
+        continue;
+      }
+      if (!inStr) {
+        if (char === "{" || char === "[") {
+          stack.push({ char, index: i });
+        } else if (char === "}") {
+          if (stack.length && stack[stack.length - 1].char === "{") {
+            stack.pop();
+          }
+        } else if (char === "]") {
+          if (stack.length && stack[stack.length - 1].char === "[") {
+            stack.pop();
+          }
+        }
+      }
+    }
+
+    // If an object is unclosed inside an array (e.g. [{"a":1}, {"b": ...),
+    // drop the incomplete array element
+    if (
+      stack.length >= 2 &&
+      stack[stack.length - 1].char === "{" &&
+      stack[stack.length - 2].char === "["
+    ) {
+      const unclosedObj = stack.pop()!;
+      candidate = candidate.slice(0, unclosedObj.index);
+    } else if (inStr) {
+      candidate += '"';
+    }
+
+    let trimmedCand = candidate.trim().replace(/,\s*$/, "");
+
+    let closing = "";
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const open = stack[i].char;
+      if (open === "{") closing += "}";
+      else if (open === "[") closing += "]";
+    }
+
+    try {
+      return JSON.parse(trimmedCand + closing);
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. Try closing directly from current text
+  const directClose = tryClose(text);
+  if (directClose !== null) return directClose;
+
+  // 2. Try backtracking to structural delimiters: '}', ']', ','
+  for (let i = text.length - 1; i >= 0; i--) {
+    const char = text[i];
+    if (char === "}" || char === "]" || char === ",") {
+      const sub = text.slice(0, char === "," ? i : i + 1);
+      const res = tryClose(sub);
+      if (res !== null) return res;
+    }
+  }
+
+  return null;
+}
+
 export function extractJson(content: string): unknown {
   const trimmed = content.trim();
 
@@ -331,6 +446,12 @@ export function extractJson(content: string): unknown {
     }
   }
 
+  // 4. Fallback repair for truncated JSON
+  const repaired = repairTruncatedJson(trimmed);
+  if (repaired !== null) {
+    return repaired;
+  }
+
   throw new LlmError(
     "The model did not return valid JSON.",
     "INVALID_MODEL_JSON",
@@ -340,11 +461,17 @@ export function extractJson(content: string): unknown {
 
 export function redactSecrets(text: string, apiKey?: string): string {
   let result = text;
-  if (apiKey) {
-    result = result.split(apiKey).join("[REDACTED]");
-  }
   result = result.replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, "Bearer [REDACTED]");
   result = result.replace(/(?:sk-|gsk_)[A-Za-z0-9_-]{10,}/gi, "[REDACTED_KEY]");
+  result = result.replace(/(mongodb(?:\+srv)?:\/\/)[^\s"'/]+@/gi, "$1[REDACTED]@");
+  const keyToRedact = apiKey || process.env.LLM_API_KEY;
+  if (keyToRedact) {
+    result = result.split(keyToRedact).join("[REDACTED]");
+  }
+  const sessionSecret = process.env.SESSION_SECRET;
+  if (sessionSecret && sessionSecret.length >= 8) {
+    result = result.split(sessionSecret).join("[REDACTED]");
+  }
   return result;
 }
 
@@ -407,9 +534,9 @@ async function executeGenerateStructuredJson<T = unknown>(
       ? 1800
       : 1500;
 
-  const targetMaxTokens = options?.maxTokens || defaultTokens;
+  let targetMaxTokens = options?.maxTokens || defaultTokens;
   const estimatedInput = estimateInputTokens(prompt);
-  const estimatedDemand = estimatedInput + targetMaxTokens;
+  let estimatedDemand = estimatedInput + targetMaxTokens;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     // Coordinate rate-limit budget before dispatching
@@ -473,7 +600,10 @@ async function executeGenerateStructuredJson<T = unknown>(
 
     if (response.ok) {
       let payload: {
-        choices?: Array<{ message?: { content?: unknown } }>;
+        choices?: Array<{
+          message?: { content?: unknown };
+          finish_reason?: string;
+        }>;
         usage?: {
           prompt_tokens?: number;
           completion_tokens?: number;
@@ -503,7 +633,9 @@ async function executeGenerateStructuredJson<T = unknown>(
       }
       globalTokenStats.calls += 1;
 
-      const content = payload.choices?.[0]?.message?.content;
+      const choice = payload.choices?.[0];
+      const content = choice?.message?.content;
+      const finishReason = choice?.finish_reason;
 
       if (typeof content !== "string") {
         throw new LlmError(
@@ -518,10 +650,12 @@ async function executeGenerateStructuredJson<T = unknown>(
       } catch (err) {
         if (options?.schema && attempt < MAX_ATTEMPTS) {
           console.warn(
-            `[LLM Client][Stage: ${stage}][Attempt ${attempt}/${MAX_ATTEMPTS}] Failed to extract JSON from completion. Retrying with fallback prompting...`,
+            `[LLM Client][Stage: ${stage}][Attempt ${attempt}/${MAX_ATTEMPTS}] Failed to extract JSON from completion (finish_reason: ${finishReason || "unknown"}). Retrying with scaled token budget and raw JSON prompting...`,
           );
+          targetMaxTokens = Math.min(Math.round(targetMaxTokens * 1.5), 3000);
+          estimatedDemand = estimatedInput + targetMaxTokens;
           correctiveFeedback =
-            "CRITICAL: Your previous output was not valid JSON. You must return ONLY raw valid JSON starting with '{' and ending with '}'.";
+            "CRITICAL: Your previous output was not valid JSON or was truncated. You must return ONLY raw valid JSON starting with '{' and ending with '}'.";
           useJsonObjectMode = false;
           await sleep(parseRetryDelay(undefined, undefined, attempt));
           continue;
@@ -541,6 +675,8 @@ async function executeGenerateStructuredJson<T = unknown>(
           );
 
           if (attempt < MAX_ATTEMPTS) {
+            targetMaxTokens = Math.min(Math.round(targetMaxTokens * 1.5), 3000);
+            estimatedDemand = estimatedInput + targetMaxTokens;
             correctiveFeedback = `CRITICAL: Your previous output failed schema validation: ${issueSummary}. Return a valid JSON object strictly adhering to the schema.`;
             useJsonObjectMode = false;
             await sleep(parseRetryDelay(undefined, undefined, attempt));
@@ -579,6 +715,25 @@ async function executeGenerateStructuredJson<T = unknown>(
       (providerError.code === "json_validate_failed" ||
         providerError.message?.toLowerCase().includes("failed to validate json"));
 
+    if (isJsonValidationFailure && providerError.failedGeneration) {
+      try {
+        const recovered = extractJson(providerError.failedGeneration);
+        if (options?.schema) {
+          const schemaResult = options.schema.safeParse(recovered);
+          if (schemaResult.success) {
+            console.log(
+              `[LLM Client][Stage: ${stage}] Successfully recovered valid JSON from failed_generation.`,
+            );
+            return schemaResult.data;
+          }
+        } else {
+          return recovered as T;
+        }
+      } catch {
+        // failed_generation was not directly recoverable, proceed to retry
+      }
+    }
+
     globalTokenStats.retries += 1;
     if (isRateLimit) {
       globalTokenStats.rateLimitErrors += 1;
@@ -612,9 +767,11 @@ async function executeGenerateStructuredJson<T = unknown>(
 
     if (isJsonValidationFailure) {
       console.warn(
-        `[LLM Client][Stage: ${stage}] Provider rejected response_format: json_object (${providerError.code}). Falling back to raw JSON prompt on attempt ${attempt + 1}...`,
+        `[LLM Client][Stage: ${stage}] Provider rejected response_format: json_object (${providerError.code}). Falling back to raw JSON prompt with scaled tokens on attempt ${attempt + 1}...`,
       );
       useJsonObjectMode = false;
+      targetMaxTokens = Math.min(Math.round(targetMaxTokens * 1.5), 3000);
+      estimatedDemand = estimatedInput + targetMaxTokens;
       correctiveFeedback =
         "Return only a valid JSON object without markdown fences or conversational text.";
     }

@@ -55,7 +55,7 @@ ${jd.slice(0, 4000)}`;
 }
 
 export function buildRequirementsPrompt(jd: string): string {
-  return `Extract the distinct interview-relevant requirements from this job description.
+  return `Extract the distinct interview-relevant requirements from this job description and output as a valid JSON object.
 
 Rules:
 - Use only information supported by the job description.
@@ -69,7 +69,7 @@ Rules:
 - Split materially different requirements into separate entries.
 - Avoid duplicate requirements.
 - If the description is sparse, return only the requirements it actually supports.
-- Return JSON only, with this exact structure:
+- Output strictly a valid JSON object matching this schema:
   {"requirements":[{"text":"...","kind":"technical","priority":"must"}]}
 
 JOB DESCRIPTION:
@@ -104,7 +104,7 @@ export async function extractRequirements(
   const raw = await generate(buildRequirementsPrompt(input), {
     stage: "requirements_extraction",
     schema: RequirementsResponseSchema,
-    maxTokens: 800,
+    maxTokens: 1800,
   });
   const parsed = RequirementsResponseSchema.parse(raw);
 
@@ -137,7 +137,7 @@ export async function extractJobAnalysis(
   const raw = await generate(buildJobAnalysisPrompt(input), {
     stage: "job_analysis",
     schema: JobAnalysisResponseSchema,
-    maxTokens: 1000,
+    maxTokens: 1800,
   });
   const parsed = JobAnalysisResponseSchema.parse(raw);
 
