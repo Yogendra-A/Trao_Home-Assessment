@@ -7,7 +7,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { Badge, Spinner, ProgressBar, EmptyState } from "./ui";
-import type { InterviewKit, Question } from "../../../shared/schemas/kit";
+import type { InterviewKit, Question, Flashcard } from "../../../shared/schemas/kit";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -352,6 +352,14 @@ function BuilderTab({
   const [newCat, setNewCat] = useState<Question["category"]>("technical");
   const [newDiff, setNewDiff] = useState(2);
 
+  // Flashcard builder state
+  const [showAddFlashcard, setShowAddFlashcard] = useState(false);
+  const [newFcFront, setNewFcFront] = useState("");
+  const [newFcBack, setNewFcBack] = useState("");
+  const [newFcReqId, setNewFcReqId] = useState<string>(
+    kit.role.requirements[0]?.id || "r1"
+  );
+
   const togglePin = (qId: string) => {
     setPinnedIds((prev) => {
       const next = new Set(prev);
@@ -410,6 +418,36 @@ function BuilderTab({
     setNewPrompt("");
     setNewOutline("");
     setShowAddQuestion(false);
+  };
+
+  const handleInlineEditFlashcard = (fcId: string, patch: Partial<Flashcard>) => {
+    const updatedFlashcards = kit.flashcards.map((fc) =>
+      fc.id === fcId ? { ...fc, ...patch } : fc
+    );
+    onKitUpdate({ ...kit, flashcards: updatedFlashcards });
+  };
+
+  const handleDeleteFlashcard = (fcId: string) => {
+    const filtered = kit.flashcards.filter((fc) => fc.id !== fcId);
+    onKitUpdate({ ...kit, flashcards: filtered });
+  };
+
+  const handleAddFlashcard = () => {
+    if (!newFcFront.trim()) return;
+    const reqId = newFcReqId || kit.role.requirements[0]?.id || "r1";
+    const customCard: Flashcard = {
+      id: `fc_custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      front: newFcFront.trim(),
+      back: newFcBack.trim() || "Prepared answer strategy.",
+      requirement_ids: [reqId],
+    };
+    onKitUpdate({
+      ...kit,
+      flashcards: [...kit.flashcards, customCard],
+    });
+    setNewFcFront("");
+    setNewFcBack("");
+    setShowAddFlashcard(false);
   };
 
   const handleRegenerate = async (section: "brief" | "category" | "schedule", category?: Question["category"]) => {
@@ -666,6 +704,193 @@ function BuilderTab({
           })}
         </div>
       </div>
+
+      {/* Flashcards */}
+      <div className="card">
+        <div className="section-header">
+          <div>
+            <h3 className="section-title">Flashcards</h3>
+            <p className="section-desc">
+              {kit.flashcards.length} revision cards — edit front and back, delete, or create custom cards
+            </p>
+          </div>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowAddFlashcard((p) => !p)}
+          >
+            <Plus size={14} />
+            Add flashcard
+          </button>
+        </div>
+
+        {/* Add flashcard panel */}
+        {showAddFlashcard && (
+          <div
+            style={{
+              background: "var(--surface-2)",
+              border: "1px solid var(--accent)",
+              borderRadius: "var(--r-md)",
+              padding: "1rem",
+              marginBottom: "1.25rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.75rem",
+            }}
+            className="animate-slide-up"
+          >
+            <h4 style={{ color: "var(--accent)" }}>Add custom flashcard</h4>
+            <div className="form-group">
+              <label className="form-label" style={{ fontSize: "0.8125rem" }}>
+                Front (Question / Prompt)
+              </label>
+              <input
+                className="form-input"
+                placeholder="e.g. How do you mitigate cascading failures in distributed systems?"
+                value={newFcFront}
+                onChange={(e) => setNewFcFront(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label" style={{ fontSize: "0.8125rem" }}>
+                Back (Answer Strategy / Key Points)
+              </label>
+              <textarea
+                className="form-textarea"
+                placeholder="e.g. Use circuit breakers, exponential backoff with jitter, load shedding..."
+                rows={3}
+                value={newFcBack}
+                onChange={(e) => setNewFcBack(e.target.value)}
+              />
+            </div>
+            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}>
+              {kit.role.requirements.length > 0 && (
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <select
+                    className="form-select"
+                    value={newFcReqId}
+                    onChange={(e) => setNewFcReqId(e.target.value)}
+                    style={{ width: "100%", fontSize: "0.8125rem" }}
+                  >
+                    {kit.role.requirements.map((req) => (
+                      <option key={req.id} value={req.id}>
+                        {req.id}: {req.text.length > 60 ? `${req.text.slice(0, 60)}…` : req.text} ({req.kind})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <button className="btn btn-primary btn-sm" onClick={handleAddFlashcard}>
+                Save flashcard
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowAddFlashcard(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Flashcards list */}
+        {kit.flashcards.length === 0 ? (
+          <EmptyState
+            title="No flashcards in kit"
+            description="Add custom flashcards above to practice specific questions."
+          />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            {kit.flashcards.map((fc, idx) => {
+              const reqText =
+                kit.role.requirements.find((r) => fc.requirement_ids.includes(r.id))?.text;
+              return (
+                <div
+                  key={fc.id}
+                  className="card"
+                  style={{
+                    padding: "1rem",
+                    background: "var(--surface-2)",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      marginBottom: "0.75rem",
+                      flexWrap: "wrap",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-3)", minWidth: "2ch" }}>
+                        #{idx + 1}
+                      </span>
+                      <Badge>Flashcard</Badge>
+                      {reqText && (
+                        <span
+                          style={{
+                            fontSize: "0.75rem",
+                            color: "var(--text-3)",
+                            maxWidth: 320,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                          title={reqText}
+                        >
+                          Target: {reqText}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      className="btn btn-icon btn-ghost btn-sm"
+                      onClick={() => handleDeleteFlashcard(fc.id)}
+                      style={{ color: "var(--danger)", marginLeft: "auto" }}
+                      aria-label="Delete flashcard"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                    <div>
+                      <label
+                        className="form-label"
+                        style={{ fontSize: "0.75rem", color: "var(--text-3)", marginBottom: "0.25rem" }}
+                      >
+                        Front (Prompt)
+                      </label>
+                      <input
+                        className="form-input"
+                        value={fc.front}
+                        onChange={(e) =>
+                          handleInlineEditFlashcard(fc.id, { front: e.target.value })
+                        }
+                        style={{ fontWeight: 600 }}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        className="form-label"
+                        style={{ fontSize: "0.75rem", color: "var(--text-3)", marginBottom: "0.25rem" }}
+                      >
+                        Back (Answer Strategy)
+                      </label>
+                      <textarea
+                        className="form-textarea"
+                        rows={2}
+                        value={fc.back}
+                        onChange={(e) =>
+                          handleInlineEditFlashcard(fc.id, { back: e.target.value })
+                        }
+                        style={{ fontSize: "0.875rem" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -772,7 +997,8 @@ function PracticeTab({
   });
 
   const [currentIndex, setCurrentIndex] = useState(0);
-  const currentCard = cards[currentIndex];
+  const safeIndex = cards.length > 0 ? Math.min(currentIndex, cards.length - 1) : 0;
+  const currentCard = cards[safeIndex];
 
   const handleRate = async (confidence: "low" | "medium" | "high") => {
     if (!currentCard) return;
@@ -791,8 +1017,8 @@ function PracticeTab({
       } catch { /* continue offline */ }
     }
 
-    if (currentIndex < cards.length - 1) {
-      setCurrentIndex((p) => p + 1);
+    if (safeIndex < cards.length - 1) {
+      setCurrentIndex(safeIndex + 1);
       setRevealed(false);
     }
   };
@@ -854,7 +1080,7 @@ function PracticeTab({
       {currentCard && (
         <div className="flashcard animate-scale-in">
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", color: "var(--text-3)", marginBottom: "1rem" }}>
-            <span>Card {currentIndex + 1} of {cards.length}</span>
+            <span>Card {safeIndex + 1} of {cards.length}</span>
             {ratingForCurrent && (
               <span style={{ color: confidenceColors[ratingForCurrent], fontWeight: 600 }}>
                 {ratingForCurrent.charAt(0).toUpperCase() + ratingForCurrent.slice(1)} confidence
@@ -928,15 +1154,15 @@ function PracticeTab({
       <div style={{ display: "flex", justifyContent: "space-between" }}>
         <button
           className="btn btn-secondary btn-sm"
-          disabled={currentIndex === 0}
-          onClick={() => { setCurrentIndex((p) => p - 1); setRevealed(false); }}
+          disabled={safeIndex === 0}
+          onClick={() => { setCurrentIndex(Math.max(0, safeIndex - 1)); setRevealed(false); }}
         >
           ← Previous
         </button>
         <button
           className="btn btn-secondary btn-sm"
-          disabled={currentIndex === cards.length - 1}
-          onClick={() => { setCurrentIndex((p) => p + 1); setRevealed(false); }}
+          disabled={safeIndex === cards.length - 1}
+          onClick={() => { setCurrentIndex(Math.min(cards.length - 1, safeIndex + 1)); setRevealed(false); }}
         >
           Next →
         </button>

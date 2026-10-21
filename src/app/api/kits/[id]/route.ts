@@ -4,6 +4,7 @@ import {
   getKitById,
   updateKit,
   deleteKit,
+  RepositoryError,
 } from "../../../../../server/src/db/repository";
 
 export async function GET(
@@ -19,16 +20,33 @@ export async function GET(
   }
 
   const { id } = await context.params;
-  const kit = await getKitById(id, session.userId);
 
-  if (!kit) {
+  try {
+    const kit = await getKitById(id, session.userId);
+
+    if (!kit) {
+      return Response.json(
+        { error: "Kit not found or access denied.", code: "NOT_FOUND" },
+        { status: 404 },
+      );
+    }
+
+    return Response.json(kit, { status: 200 });
+  } catch (error) {
+    if (error instanceof RepositoryError && error.code === "DATABASE_UNAVAILABLE") {
+      return Response.json(
+        {
+          error: "Database service is temporarily unavailable. Please try again shortly.",
+          code: "SERVICE_UNAVAILABLE",
+        },
+        { status: 503 },
+      );
+    }
     return Response.json(
-      { error: "Kit not found or access denied.", code: "NOT_FOUND" },
-      { status: 404 },
+      { error: "Failed to retrieve kit.", code: "INTERNAL_ERROR" },
+      { status: 500 },
     );
   }
-
-  return Response.json(kit, { status: 200 });
 }
 
 export async function PUT(
@@ -62,16 +80,32 @@ export async function PUT(
     );
   }
 
-  const updated = await updateKit(id, session.userId, body as any);
+  try {
+    const updated = await updateKit(id, session.userId, body as any);
 
-  if (!updated) {
+    if (!updated) {
+      return Response.json(
+        { error: "Kit not found or access denied.", code: "NOT_FOUND" },
+        { status: 404 },
+      );
+    }
+
+    return Response.json(updated, { status: 200 });
+  } catch (error) {
+    if (error instanceof RepositoryError && error.code === "DATABASE_UNAVAILABLE") {
+      return Response.json(
+        {
+          error: "Database service is temporarily unavailable. Please try again shortly.",
+          code: "SERVICE_UNAVAILABLE",
+        },
+        { status: 503 },
+      );
+    }
     return Response.json(
-      { error: "Kit not found or access denied.", code: "NOT_FOUND" },
-      { status: 404 },
+      { error: "Failed to update kit.", code: "INTERNAL_ERROR" },
+      { status: 500 },
     );
   }
-
-  return Response.json(updated, { status: 200 });
 }
 
 export async function DELETE(
@@ -87,14 +121,31 @@ export async function DELETE(
   }
 
   const { id } = await context.params;
-  const success = await deleteKit(id, session.userId);
 
-  if (!success) {
+  try {
+    const success = await deleteKit(id, session.userId);
+
+    if (!success) {
+      return Response.json(
+        { error: "Kit not found or access denied.", code: "NOT_FOUND" },
+        { status: 404 },
+      );
+    }
+
+    return Response.json({ success: true }, { status: 200 });
+  } catch (error) {
+    if (error instanceof RepositoryError && error.code === "DATABASE_UNAVAILABLE") {
+      return Response.json(
+        {
+          error: "Database service is temporarily unavailable. Please try again shortly.",
+          code: "SERVICE_UNAVAILABLE",
+        },
+        { status: 503 },
+      );
+    }
     return Response.json(
-      { error: "Kit not found or access denied.", code: "NOT_FOUND" },
-      { status: 404 },
+      { error: "Failed to delete kit.", code: "INTERNAL_ERROR" },
+      { status: 500 },
     );
   }
-
-  return Response.json({ success: true }, { status: 200 });
 }

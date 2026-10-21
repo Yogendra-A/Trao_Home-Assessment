@@ -6,6 +6,7 @@ import {
   createSessionToken,
   verifyToken,
   signToken,
+  getSessionCookieHeader,
 } from "../src/auth/session";
 import {
   createUser,
@@ -17,6 +18,8 @@ import {
   updateKit,
   deleteKit,
   RepositoryError,
+  isInMemoryFallbackAllowed,
+  clearFallbackStore,
 } from "../src/db/repository";
 import {
   getMongoClient,
@@ -24,6 +27,9 @@ import {
   DB_NAME,
 } from "../src/db/client";
 import type { InterviewKit } from "../../shared/schemas/kit";
+import { POST as registerHandler } from "../../src/app/api/auth/register/route";
+import { POST as loginHandler } from "../../src/app/api/auth/login/route";
+import { GET as meHandler } from "../../src/app/api/auth/me/route";
 
 const sampleKit: InterviewKit = {
   source: {
@@ -264,6 +270,27 @@ describe("User & Kit Persistence with Scoping and Ownership", () => {
     expect(foundById).not.toBeNull();
     expect(foundById?.email).toBe(email);
   });
+
+  it("normalizes emails to lowercase and trims whitespace", async () => {
+    const rand = Math.random().toString(36).substring(2, 9);
+    const rawEmail = `  UpperCase_${rand}@Example.COM  `;
+    const normalized = `uppercase_${rand}@example.com`;
+    const user = await createUser(rawEmail, "passwordHash123");
+
+    expect(user.email).toBe(normalized);
+
+    // Lookup with different case/spacing must find the same user
+    const found = await findUserByEmail(` UPPERCASE_${rand}@example.COM `);
+    expect(found).not.toBeNull();
+    expect(found?.id).toBe(user.id);
+
+    // Duplicate registration with different case must be rejected
+    await expect(
+      createUser(`UPPERcase_${rand}@Example.com`, "anotherHash"),
+    ).rejects.toMatchObject({
+      code: "USER_EXISTS",
+    });
+  });
 });
 
 describe("Database Client & Atlas Connection Pooling", () => {
@@ -343,6 +370,203 @@ describe("Database Client & Atlas Connection Pooling", () => {
       });
     } finally {
       (process.env as any).NODE_ENV = prevEnv;
+      if (prevUri !== undefined) process.env.MONGODB_URI = prevUri;
+      else delete process.env.MONGODB_URI;
+      global._mongoClientPromise = prevPromise;
+    }
+  });
+
+  it("strictly prohibits in-memory fallback when MONGODB_URI is configured and fallback is not allowed", async () => {
+    const prevEnvFallback = process.env.ALLOW_IN_MEMORY_FALLBACK;
+    const prevUri = process.env.MONGODB_URI;
+    const prevPromise = global._mongoClientPromise;
+    try {
+      delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      process.env.MONGODB_URI = "mongodb://malformed:uri:with:invalid:scheme";
+      global._mongoClientPromise = undefined;
+
+      expect(isInMemoryFallbackAllowed()).toBe(false);
+
+      await expect(
+        createUser(`strict_user_${Date.now()}@example.com`, "hash"),
+      ).rejects.toMatchObject({
+        code: "DATABASE_UNAVAILABLE",
+      });
+    } finally {
+      if (prevEnvFallback !== undefined) process.env.ALLOW_IN_MEMORY_FALLBACK = prevEnvFallback;
+      else delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      if (prevUri !== undefined) process.env.MONGODB_URI = prevUri;
+      else delete process.env.MONGODB_URI;
+      global._mongoClientPromise = prevPromise;
+    }
+  });
+});
+
+describe("Authentication Routes & Database Failure Differentiation", () => {
+  it("registers a user and returns 201 with Set-Cookie", async () => {
+    const email = `reg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@example.com`;
+    const req = new Request("http://localhost/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "password123" }),
+    });
+
+    const res = await registerHandler(req as any);
+    expect(res.status).toBe(201);
+    const data = await res.json();
+    expect(data.user.email).toBe(email);
+    expect(res.headers.get("Set-Cookie")).toContain("trao_session=");
+  });
+
+  it("returns 409 USER_EXISTS when registering an existing email", async () => {
+    const email = `duplicate_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@example.com`;
+    await createUser(email, "somehash");
+
+    const req = new Request("http://localhost/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "password123" }),
+    });
+
+    const res = await registerHandler(req as any);
+    expect(res.status).toBe(409);
+    const data = await res.json();
+    expect(data.code).toBe("USER_EXISTS");
+  });
+
+  it("authenticates valid credentials and sets session cookie", async () => {
+    const email = `login_success_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@example.com`;
+    const password = "ValidPassword123!";
+    const hash = await hashPassword(password);
+    await createUser(email, hash);
+
+    const req = new Request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+
+    const res = await loginHandler(req as any);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.user.email).toBe(email);
+    expect(res.headers.get("Set-Cookie")).toContain("trao_session=");
+  });
+
+  it("returns 401 INVALID_CREDENTIALS when user does not exist", async () => {
+    const req = new Request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "nonexistent_user@example.com", password: "somePassword" }),
+    });
+
+    const res = await loginHandler(req as any);
+    expect(res.status).toBe(401);
+    const data = await res.json();
+    expect(data.code).toBe("INVALID_CREDENTIALS");
+    expect(data.error).toBe("Invalid email or password.");
+  });
+
+  it("returns 401 INVALID_CREDENTIALS when password does not match", async () => {
+    const email = `wrong_pass_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@example.com`;
+    const hash = await hashPassword("RightPassword123!");
+    await createUser(email, hash);
+
+    const req = new Request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "WrongPassword!" }),
+    });
+
+    const res = await loginHandler(req as any);
+    expect(res.status).toBe(401);
+    const data = await res.json();
+    expect(data.code).toBe("INVALID_CREDENTIALS");
+    expect(data.error).toBe("Invalid email or password.");
+  });
+
+  it("differentiates database outage from invalid credentials: returns 503 instead of 401", async () => {
+    const prevEnvFallback = process.env.ALLOW_IN_MEMORY_FALLBACK;
+    const prevUri = process.env.MONGODB_URI;
+    const prevPromise = global._mongoClientPromise;
+    try {
+      delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      process.env.MONGODB_URI = "mongodb://malformed:uri:with:invalid:scheme";
+      global._mongoClientPromise = undefined;
+
+      const req = new Request("http://localhost/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "anyuser@example.com", password: "anyPassword" }),
+      });
+
+      const res = await loginHandler(req as any);
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe("SERVICE_UNAVAILABLE");
+      expect(data.error).toContain("Authentication service is temporarily unavailable");
+    } finally {
+      if (prevEnvFallback !== undefined) process.env.ALLOW_IN_MEMORY_FALLBACK = prevEnvFallback;
+      else delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      if (prevUri !== undefined) process.env.MONGODB_URI = prevUri;
+      else delete process.env.MONGODB_URI;
+      global._mongoClientPromise = prevPromise;
+    }
+  });
+
+  it("returns 503 on registration when database is unavailable rather than silently writing to volatile memory", async () => {
+    const prevEnvFallback = process.env.ALLOW_IN_MEMORY_FALLBACK;
+    const prevUri = process.env.MONGODB_URI;
+    const prevPromise = global._mongoClientPromise;
+    try {
+      delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      process.env.MONGODB_URI = "mongodb://malformed:uri:with:invalid:scheme";
+      global._mongoClientPromise = undefined;
+
+      const req = new Request("http://localhost/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "newuser@example.com", password: "Password123!" }),
+      });
+
+      const res = await registerHandler(req as any);
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe("SERVICE_UNAVAILABLE");
+      expect(data.error).toContain("Registration service is temporarily unavailable");
+    } finally {
+      if (prevEnvFallback !== undefined) process.env.ALLOW_IN_MEMORY_FALLBACK = prevEnvFallback;
+      else delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      if (prevUri !== undefined) process.env.MONGODB_URI = prevUri;
+      else delete process.env.MONGODB_URI;
+      global._mongoClientPromise = prevPromise;
+    }
+  });
+
+  it("returns 503 on /api/auth/me when database is unavailable", async () => {
+    const token = createSessionToken("usr_test_123");
+    const prevEnvFallback = process.env.ALLOW_IN_MEMORY_FALLBACK;
+    const prevUri = process.env.MONGODB_URI;
+    const prevPromise = global._mongoClientPromise;
+    try {
+      delete process.env.ALLOW_IN_MEMORY_FALLBACK;
+      process.env.MONGODB_URI = "mongodb://malformed:uri:with:invalid:scheme";
+      global._mongoClientPromise = undefined;
+
+      const req = new Request("http://localhost/api/auth/me", {
+        method: "GET",
+        headers: {
+          Cookie: `trao_session=${token}`,
+        },
+      });
+
+      const res = await meHandler(req as any);
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe("SERVICE_UNAVAILABLE");
+    } finally {
+      if (prevEnvFallback !== undefined) process.env.ALLOW_IN_MEMORY_FALLBACK = prevEnvFallback;
+      else delete process.env.ALLOW_IN_MEMORY_FALLBACK;
       if (prevUri !== undefined) process.env.MONGODB_URI = prevUri;
       else delete process.env.MONGODB_URI;
       global._mongoClientPromise = prevPromise;

@@ -159,3 +159,11 @@ export type Requirement = z.infer<typeof RequirementSchema>;
 export type Question = z.infer<typeof QuestionSchema>;
 export type Flashcard = z.infer<typeof FlashcardSchema>;
 export type InterviewKit = z.infer<typeof InterviewKitSchema>;
+
+export const KitGenerationRequestSchema = z.object({
+  jd: z.string().min(1, "Job description is required."),
+  company_url: z.string().min(1, "Company URL is required."),
+  days: z.number().int().min(1).max(60),
+});
+
+export type KitGenerationRequest = z.infer<typeof KitGenerationRequestSchema>;

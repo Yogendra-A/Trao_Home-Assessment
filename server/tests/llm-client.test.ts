@@ -381,3 +381,228 @@ describe("429 rate limiting and request queue", () => {
     expect(maxInFlight).toBe(1); // Never more than 1 in flight simultaneously
   });
 });
+
+
+describe("Structured output resilience and schema validation", () => {
+  it("drops response_format on retry when provider returns json_validate_failed and succeeds", async () => {
+    vi.stubEnv("LLM_BASE_URL", "https://llm.example/v1");
+    vi.stubEnv("LLM_API_KEY", "test-key");
+    vi.stubEnv("LLM_MODEL", "openai/gpt-oss-20b");
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+              type: "invalid_request_error",
+              code: "json_validate_failed",
+              failed_generation: '{"incomplete":',
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"success": true, "items": ["a", "b"]}' } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await generateStructuredJson("Extract items", { stage: "test_stage" });
+    expect(result).toEqual({ success: true, items: ["a", "b"] });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // Verify first attempt sent response_format json_object
+    const firstCallBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(firstCallBody.response_format).toEqual({ type: "json_object" });
+
+    // Verify second attempt dropped response_format as fallback
+    const secondCallBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+    expect(secondCallBody.response_format).toBeUndefined();
+
+    consoleSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("extracts JSON embedded in conversational preamble or markdown code blocks", async () => {
+    vi.stubEnv("LLM_BASE_URL", "https://llm.example/v1");
+    vi.stubEnv("LLM_API_KEY", "test-key");
+    vi.stubEnv("LLM_MODEL", "test-model");
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content:
+                  'Certainly! Here is the JSON you requested:\n```json\n{\n  "role": "Backend Engineer",\n  "skills": ["Go", "Kubernetes"]\n}\n```\nHope that helps!',
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await generateStructuredJson("Extract role");
+    expect(result).toEqual({
+      role: "Backend Engineer",
+      skills: ["Go", "Kubernetes"],
+    });
+  });
+
+  it("retries when response fails Zod schema validation and recovers on subsequent attempt", async () => {
+    vi.stubEnv("LLM_BASE_URL", "https://llm.example/v1");
+    vi.stubEnv("LLM_API_KEY", "test-key");
+    vi.stubEnv("LLM_MODEL", "test-model");
+
+    const { z } = await import("zod");
+    const TargetSchema = z.object({
+      name: z.string(),
+      count: z.number().int(),
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const mockFetch = vi
+      .fn()
+      // First attempt returns wrong type (count as string)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"name": "test", "count": "not-a-number"}' } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      // Second attempt returns corrected valid types
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"name": "test", "count": 42}' } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await generateStructuredJson("Get count", {
+      schema: TargetSchema,
+      stage: "schema_test",
+    });
+
+    expect(result).toEqual({ name: "test", count: 42 });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // Verify corrective feedback was appended to the second prompt
+    const secondCallBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+    const userMessage = secondCallBody.messages[1].content;
+    expect(userMessage).toContain("CRITICAL: Your previous output failed schema validation");
+
+    warnSpy.mockRestore();
+  });
+
+  it("throws SCHEMA_VALIDATION_FAILED after exhausting retries on persistent invalid schema", async () => {
+    vi.stubEnv("LLM_BASE_URL", "https://llm.example/v1");
+    vi.stubEnv("LLM_API_KEY", "test-key");
+    vi.stubEnv("LLM_MODEL", "test-model");
+
+    const { z } = await import("zod");
+    const TargetSchema = z.object({
+      requiredKey: z.string(),
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const mockFetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"wrongKey": 123}' } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    await expect(
+      generateStructuredJson("Get data", { schema: TargetSchema }),
+    ).rejects.toMatchObject({
+      code: "SCHEMA_VALIDATION_FAILED",
+      retryable: false,
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    warnSpy.mockRestore();
+  });
+});
+
+describe("Rate-Limit Scheduling and Token Budget Tracking", () => {
+  it("tracks rate limit status from response headers", async () => {
+    const { updateRateLimitFromHeaders, getRateLimitStatus, resetRateLimitStatus } = await import(
+      "../src/pipeline/llm/chat-completions"
+    );
+
+    resetRateLimitStatus();
+    const headers = new Headers({
+      "x-ratelimit-limit-tokens": "8000",
+      "x-ratelimit-remaining-tokens": "5200",
+      "x-ratelimit-reset-tokens": "6.5s",
+      "x-ratelimit-limit-requests": "30",
+      "x-ratelimit-remaining-requests": "25",
+    });
+
+    updateRateLimitFromHeaders(headers);
+    const status = getRateLimitStatus();
+
+    expect(status.limitTokens).toBe(8000);
+    expect(status.remainingTokens).toBe(5200);
+    expect(status.resetTokensMs).toBe(6500);
+    expect(status.remainingRequests).toBe(25);
+  });
+
+  it("accurately estimates input tokens from text", async () => {
+    const { estimateInputTokens } = await import("../src/pipeline/llm/chat-completions");
+
+    const sampleText = "Short prompt text.";
+    const tokens = estimateInputTokens(sampleText);
+    expect(tokens).toBeGreaterThan(0);
+    expect(tokens).toBe(Math.ceil(sampleText.length / 3.5));
+  });
+
+  it("adds bounded jitter when withJitter is requested", async () => {
+    const { parseRetryDelay } = await import("../src/pipeline/llm/chat-completions");
+
+    const withoutJitter = parseRetryDelay(undefined, undefined, 1, false);
+    expect(withoutJitter).toBe(1000);
+
+    const withJitter = parseRetryDelay(undefined, undefined, 1, true);
+    expect(withJitter).toBeGreaterThanOrEqual(1050);
+    expect(withJitter).toBeLessThanOrEqual(1350);
+  });
+
+  it("accumulates and resets token usage statistics", async () => {
+    const { getTokenStats, resetTokenStats } = await import("../src/pipeline/llm/chat-completions");
+
+    resetTokenStats();
+    const initial = getTokenStats();
+    expect(initial.totalTokens).toBe(0);
+    expect(initial.calls).toBe(0);
+  });
+});

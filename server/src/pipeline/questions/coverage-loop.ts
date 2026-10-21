@@ -51,7 +51,11 @@ export async function generateWithCoverage(
         ? requirements
         : requirements.filter((r) => uncoveredIds.includes(r.id));
 
-    const generated = await generateQuestions(targetRequirements, generate, researchContext);
+    const generated = await generateQuestions(
+      targetRequirements,
+      generate,
+      researchContext,
+    );
 
     const existingIds = new Set(questions.map((q) => q.id));
     questions.push(...generated.filter((q) => !existingIds.has(q.id)));

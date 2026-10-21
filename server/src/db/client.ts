@@ -13,6 +13,29 @@ export function sanitizeUri(uri: string): string {
   return uri.replace(/\/\/[^:]+:[^@]+@/, "//***:***@");
 }
 
+function sanitizeErrorMessage(msg: string): string {
+  return msg.replace(/\/\/[^:]+:[^@]+@/, "//***:***@");
+}
+
+function logDatabaseConnectionError(sanitizedUri: string, error: unknown): void {
+  const rawMsg = error instanceof Error ? error.message : String(error);
+  const sanitizedMsg = sanitizeErrorMessage(rawMsg);
+
+  console.error(`[Database] Connection to ${sanitizedUri} failed: ${sanitizedMsg}`);
+
+  if (
+    sanitizedMsg.includes("SSL alert number 80") ||
+    sanitizedMsg.includes("ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR") ||
+    sanitizedMsg.includes("tlsv1 alert internal error")
+  ) {
+    console.error(
+      `[Database] DIAGNOSIS: MongoDB Atlas rejected the TLS connection (SSL alert 80).\n` +
+      `[Database] This indicates that your outbound IP address is not authorized in MongoDB Atlas Network Access.\n` +
+      `[Database] ACTION REQUIRED: In MongoDB Atlas Dashboard -> Security -> Network Access, add your current IP address (or 0.0.0.0/0 for broad development access).`
+    );
+  }
+}
+
 export async function getMongoClient(): Promise<MongoClient | null> {
   if (global._mongoClientPromise) {
     return global._mongoClientPromise;
@@ -34,15 +57,15 @@ export async function getMongoClient(): Promise<MongoClient | null> {
   try {
     client = new MongoClient(uri, {
       maxPoolSize: 10,
-      minPoolSize: 2,
-      serverSelectionTimeoutMS: 8000,
-      connectTimeoutMS: 8000,
+      minPoolSize: 0,
+      serverSelectionTimeoutMS: 5000,
+      connectTimeoutMS: 5000,
+      socketTimeoutMS: 30000,
+      retryWrites: true,
+      retryReads: true,
     });
   } catch (error) {
-    const sanitizedMsg = error instanceof Error ? error.message.replace(/\/\/[^:]+:[^@]+@/, "//***:***@") : String(error);
-    console.error(
-      `[Database] Connection to ${sanitized} failed: ${sanitizedMsg}`,
-    );
+    logDatabaseConnectionError(sanitized, error);
     if (isProd) {
       throw new Error("Failed to connect to MongoDB Atlas in production.");
     }
@@ -51,14 +74,17 @@ export async function getMongoClient(): Promise<MongoClient | null> {
 
   const promise = client.connect().then(
     async (connectedClient) => {
+      // Attach disconnect listeners to clear cached promise on connection loss
+      connectedClient.on("close", () => {
+        global._mongoClientPromise = undefined;
+        global._mongoIndexesEnsured = undefined;
+      });
+
       await ensureIndexes(connectedClient.db(DB_NAME));
       return connectedClient;
     },
     (error) => {
-      const sanitizedMsg = error instanceof Error ? error.message.replace(/\/\/[^:]+:[^@]+@/, "//***:***@") : String(error);
-      console.error(
-        `[Database] Connection to ${sanitized} failed: ${sanitizedMsg}`,
-      );
+      logDatabaseConnectionError(sanitized, error);
       global._mongoClientPromise = undefined;
 
       if (isProd) {
@@ -75,6 +101,17 @@ export async function getMongoClient(): Promise<MongoClient | null> {
 export async function getDb(): Promise<Db | null> {
   const client = await getMongoClient();
   return client ? client.db(DB_NAME) : null;
+}
+
+export async function isDbConnected(): Promise<boolean> {
+  try {
+    const client = await getMongoClient();
+    if (!client) return false;
+    await client.db(DB_NAME).command({ ping: 1 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function closeDbConnection(): Promise<void> {

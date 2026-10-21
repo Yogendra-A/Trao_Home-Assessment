@@ -1,8 +1,8 @@
-
 import { describe, expect, it, vi } from "vitest";
 import type { ExtractedRequirement } from "../src/pipeline/requirements/extract";
 import {
   generateQuestions,
+  filterRequirementsForCategory,
   type QuestionGenerator,
 } from "../src/pipeline/questions/generate";
 import {
@@ -109,7 +109,6 @@ describe("question generation and coverage", () => {
     ]);
   });
 
-
   it("uses the second pass to generate a missing question", async () => {
     let technicalCalls = 0;
 
@@ -146,7 +145,6 @@ describe("question generation and coverage", () => {
     ).toContain("r_teamwork");
   });
 
-
   it("refuses to finalize when a must-have remains uncovered", () => {
     const result = {
       questions: [],
@@ -157,5 +155,30 @@ describe("question generation and coverage", () => {
     expect(() => assertMustHaveCoverage(requirements, result)).toThrow(
       /uncovered must-have/i,
     );
+  });
+
+  it("filters requirements by category to avoid redundant input tokens", () => {
+    const mixedRequirements: ExtractedRequirement[] = [
+      { id: "r_tech", text: "React and Node.js", kind: "technical", priority: "must" },
+      { id: "r_beh", text: "Cross-functional communication", kind: "behavioural", priority: "nice" },
+      { id: "r_dom", text: "FinTech compliance", kind: "domain", priority: "must" },
+    ];
+
+    const techFiltered = filterRequirementsForCategory(mixedRequirements, "technical");
+    expect(techFiltered.some((r) => r.id === "r_tech")).toBe(true);
+    expect(techFiltered.some((r) => r.id === "r_dom")).toBe(true);
+    expect(techFiltered.some((r) => r.id === "r_beh")).toBe(false);
+
+    const behFiltered = filterRequirementsForCategory(mixedRequirements, "behavioural");
+    expect(behFiltered.some((r) => r.id === "r_beh")).toBe(true);
+    expect(behFiltered.some((r) => r.id === "r_tech")).toBe(false);
+
+    // Fallback when a category has no matching requirements
+    const onlyTech: ExtractedRequirement[] = [
+      { id: "r_tech", text: "Python", kind: "technical", priority: "must" },
+    ];
+    const behFallback = filterRequirementsForCategory(onlyTech, "behavioural");
+    expect(behFallback).toHaveLength(1);
+    expect(behFallback[0].id).toBe("r_tech");
   });
 });

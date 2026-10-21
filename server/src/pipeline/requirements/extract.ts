@@ -1,4 +1,3 @@
-
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -12,13 +11,48 @@ export const RequirementsResponseSchema = z.object({
   requirements: z.array(RequirementSchema),
 });
 
+export const RoleMetadataSchema = z.object({
+  title: z.string().trim().min(1),
+  seniority: z.string().trim().min(1),
+  location: z.string().trim(),
+  responsibilities: z.array(z.string().trim().min(1)),
+});
+
+export const JobAnalysisResponseSchema = z.object({
+  role: RoleMetadataSchema,
+  requirements: z.array(RequirementSchema),
+});
+
 export type ExtractedRequirement = z.infer<typeof RequirementSchema> & {
   id: string;
 };
 
+export type JobAnalysis = {
+  role: z.infer<typeof RoleMetadataSchema>;
+  requirements: ExtractedRequirement[];
+};
+
 export type RequirementsGenerator = (
   prompt: string,
+  options?: { stage?: string; schema?: z.ZodType<any>; maxTokens?: number },
 ) => Promise<unknown>;
+
+export function buildJobAnalysisPrompt(jd: string): string {
+  return `Analyze this job description to extract role metadata and distinct interview-relevant requirements.
+
+Rules:
+- Use only facts supported by the job description. Do not invent unmentioned skills or responsibilities.
+- For role: extract title, seniority (e.g. Junior, Mid, Senior, Lead, Staff, or "Not specified"), location (or "Not specified"), and key responsibilities.
+- For requirements: extract distinct skills, tools, and qualifications.
+  - Mark "must" for required items, "nice" for bonus/optional items.
+  - Set kind: "technical", "behavioural", or "domain".
+- Avoid duplicates. If description is brief, return only what it actually supports.
+- Return JSON strictly in this format:
+{"role":{"title":"...","seniority":"...","location":"...","responsibilities":["..."]},"requirements":[{"text":"...","kind":"technical","priority":"must"}]}
+
+JOB DESCRIPTION:
+${jd.slice(0, 4000)}`;
+}
 
 export function buildRequirementsPrompt(jd: string): string {
   return `Extract the distinct interview-relevant requirements from this job description.
@@ -67,7 +101,11 @@ export async function extractRequirements(
     throw new Error("Job description cannot be empty.");
   }
 
-  const raw = await generate(buildRequirementsPrompt(input));
+  const raw = await generate(buildRequirementsPrompt(input), {
+    stage: "requirements_extraction",
+    schema: RequirementsResponseSchema,
+    maxTokens: 800,
+  });
   const parsed = RequirementsResponseSchema.parse(raw);
 
   const seen = new Set<string>();
@@ -84,4 +122,42 @@ export async function extractRequirements(
       seen.add(key);
       return true;
     });
+}
+
+export async function extractJobAnalysis(
+  jd: string,
+  generate: RequirementsGenerator,
+): Promise<JobAnalysis> {
+  const input = jd.trim();
+
+  if (!input) {
+    throw new Error("Job description cannot be empty.");
+  }
+
+  const raw = await generate(buildJobAnalysisPrompt(input), {
+    stage: "job_analysis",
+    schema: JobAnalysisResponseSchema,
+    maxTokens: 1000,
+  });
+  const parsed = JobAnalysisResponseSchema.parse(raw);
+
+  const seen = new Set<string>();
+
+  const requirements = parsed.requirements
+    .map((requirement) => ({
+      ...requirement,
+      id: stableRequirementId(requirement.text),
+    }))
+    .filter((requirement) => {
+      const key = requirement.text.toLowerCase().replace(/\s+/g, " ").trim();
+
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  return {
+    role: parsed.role,
+    requirements,
+  };
 }

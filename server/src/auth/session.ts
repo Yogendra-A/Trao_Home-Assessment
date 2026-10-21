@@ -65,10 +65,19 @@ export function createSessionToken(userId: string): string {
 }
 
 export function getSessionFromRequest(request: NextRequest): { userId: string } | null {
-  const cookie = request.cookies.get(SESSION_COOKIE_NAME);
-  if (!cookie?.value) return null;
+  let cookieValue = request.cookies?.get?.(SESSION_COOKIE_NAME)?.value;
 
-  const payload = verifyToken(cookie.value);
+  if (!cookieValue && typeof request.headers?.get === "function") {
+    const header = request.headers.get("cookie") || "";
+    const match = header.match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE_NAME}=([^;]+)`));
+    if (match) {
+      cookieValue = decodeURIComponent(match[1]);
+    }
+  }
+
+  if (!cookieValue) return null;
+
+  const payload = verifyToken(cookieValue);
   if (!payload) return null;
 
   return { userId: payload.userId };

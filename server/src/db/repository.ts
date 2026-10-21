@@ -4,7 +4,7 @@ import { getDb } from "./client";
 import type { UserRecord, KitRecord } from "./models";
 import type { InterviewKit } from "../../../shared/schemas/kit";
 
-// In-memory fallback stores for when MongoDB is not running or during local unit tests
+// In-memory fallback stores for deliberate test/offline modes
 const fallbackUsers = new Map<string, UserRecord>();
 const fallbackKits = new Map<string, KitRecord>();
 
@@ -15,32 +15,66 @@ export class RepositoryError extends Error {
   }
 }
 
-function assertProductionDb(db: unknown): void {
-  if (!db && process.env.NODE_ENV === "production") {
-    throw new RepositoryError(
-      "Database service is unavailable in production.",
-      "DATABASE_UNAVAILABLE",
-    );
+let warnedFallback = false;
+
+/**
+ * In-memory fallback is strictly allowed ONLY when:
+ * 1. Explicitly enabled via ALLOW_IN_MEMORY_FALLBACK="true" (for unit tests / CLI offline mode).
+ * 2. MONGODB_URI is not set AND NODE_ENV is not production.
+ *
+ * If MONGODB_URI is configured, MongoDB is the intended store and fallback is NOT permitted
+ * unless ALLOW_IN_MEMORY_FALLBACK="true".
+ */
+export function isInMemoryFallbackAllowed(): boolean {
+  if (process.env.NODE_ENV === "production") {
+    return false;
   }
+  return (
+    process.env.ALLOW_IN_MEMORY_FALLBACK === "true" ||
+    !process.env.MONGODB_URI
+  );
+}
+
+export function clearFallbackStore(): void {
+  fallbackUsers.clear();
+  fallbackKits.clear();
 }
 
 async function getActiveDb(): Promise<Db | null> {
+  const fallbackAllowed = isInMemoryFallbackAllowed();
+
   try {
     const db = await getDb();
-    assertProductionDb(db);
-    return db;
+    if (db) {
+      return db;
+    }
   } catch (error) {
     if (error instanceof RepositoryError) {
       throw error;
     }
-    if (process.env.NODE_ENV === "production") {
+    if (!fallbackAllowed) {
       throw new RepositoryError(
-        "Database service is unavailable in production.",
+        "Database service is unavailable. Please check your database connection or MongoDB Atlas IP whitelist.",
         "DATABASE_UNAVAILABLE",
       );
     }
-    return null;
   }
+
+  if (!fallbackAllowed) {
+    throw new RepositoryError(
+      "Database service is unavailable. Please check your database connection or MongoDB Atlas IP whitelist.",
+      "DATABASE_UNAVAILABLE",
+    );
+  }
+
+  if (!warnedFallback && process.env.NODE_ENV !== "test") {
+    warnedFallback = true;
+    console.warn(
+      "[Database] Notice: Using volatile in-memory fallback store. User accounts and interview kits will NOT persist across server restarts.",
+    );
+  }
+
+  return null;
 }
 
 // ─────────────────────────────────────────────
@@ -75,11 +109,14 @@ export async function createUser(
       if (err.code === 11000 || err.message?.includes("duplicate")) {
         throw new RepositoryError("A user with this email already exists.", "USER_EXISTS");
       }
-      throw err;
+      throw new RepositoryError(
+        "Failed to write user to database.",
+        "DATABASE_UNAVAILABLE",
+      );
     }
   }
 
-  // Fallback (only in non-production)
+  // Fallback (only when explicitly permitted)
   for (const existing of fallbackUsers.values()) {
     if (existing.email === normalizedEmail) {
       throw new RepositoryError("A user with this email already exists.", "USER_EXISTS");
@@ -95,17 +132,24 @@ export async function findUserByEmail(email: string): Promise<UserRecord | null>
   const db = await getActiveDb();
 
   if (db) {
-    const doc = await db.collection("users").findOne({ email: normalizedEmail });
-    if (!doc) return null;
-    return {
-      id: doc.id || String(doc._id),
-      email: doc.email,
-      passwordHash: doc.passwordHash,
-      createdAt: doc.createdAt,
-    };
+    try {
+      const doc = await db.collection("users").findOne({ email: normalizedEmail });
+      if (!doc) return null;
+      return {
+        id: doc.id || String(doc._id),
+        email: doc.email,
+        passwordHash: doc.passwordHash,
+        createdAt: doc.createdAt,
+      };
+    } catch (err: any) {
+      throw new RepositoryError(
+        "Failed to query user from database.",
+        "DATABASE_UNAVAILABLE",
+      );
+    }
   }
 
-  // Fallback (only in non-production)
+  // Fallback (only when explicitly permitted)
   for (const user of fallbackUsers.values()) {
     if (user.email === normalizedEmail) {
       return user;
@@ -119,16 +163,23 @@ export async function findUserById(id: string): Promise<UserRecord | null> {
   const db = await getActiveDb();
 
   if (db) {
-    const doc = await db.collection("users").findOne({
-      $or: [{ id }, { _id: id as any }],
-    });
-    if (!doc) return null;
-    return {
-      id: doc.id || String(doc._id),
-      email: doc.email,
-      passwordHash: doc.passwordHash,
-      createdAt: doc.createdAt,
-    };
+    try {
+      const doc = await db.collection("users").findOne({
+        $or: [{ id }, { _id: id as any }],
+      });
+      if (!doc) return null;
+      return {
+        id: doc.id || String(doc._id),
+        email: doc.email,
+        passwordHash: doc.passwordHash,
+        createdAt: doc.createdAt,
+      };
+    } catch (err: any) {
+      throw new RepositoryError(
+        "Failed to query user by id from database.",
+        "DATABASE_UNAVAILABLE",
+      );
+    }
   }
 
   return fallbackUsers.get(id) || null;
@@ -163,11 +214,18 @@ export async function saveKit(
   };
 
   if (db) {
-    await db.collection("kits").insertOne({
-      _id: record.id as any,
-      ...record,
-    });
-    return record;
+    try {
+      await db.collection("kits").insertOne({
+        _id: record.id as any,
+        ...record,
+      });
+      return record;
+    } catch (err: any) {
+      throw new RepositoryError(
+        "Failed to save kit to database.",
+        "DATABASE_UNAVAILABLE",
+      );
+    }
   }
 
   fallbackKits.set(record.id, record);
@@ -180,21 +238,28 @@ export async function listUserKits(
   const db = await getActiveDb();
 
   if (db) {
-    const docs = await db
-      .collection("kits")
-      .find({ userId })
-      .sort({ updatedAt: -1 })
-      .project({ id: 1, title: 1, company: 1, status: 1, createdAt: 1, updatedAt: 1 })
-      .toArray();
+    try {
+      const docs = await db
+        .collection("kits")
+        .find({ userId })
+        .sort({ updatedAt: -1 })
+        .project({ id: 1, title: 1, company: 1, status: 1, createdAt: 1, updatedAt: 1 })
+        .toArray();
 
-    return docs.map((doc) => ({
-      id: doc.id || String(doc._id),
-      title: doc.title,
-      company: doc.company,
-      status: doc.status,
-      createdAt: doc.createdAt,
-      updatedAt: doc.updatedAt,
-    }));
+      return docs.map((doc) => ({
+        id: doc.id || String(doc._id),
+        title: doc.title,
+        company: doc.company,
+        status: doc.status,
+        createdAt: doc.createdAt,
+        updatedAt: doc.updatedAt,
+      }));
+    } catch (err: any) {
+      throw new RepositoryError(
+        "Failed to list user kits from database.",
+        "DATABASE_UNAVAILABLE",
+      );
+    }
   }
 
   const results: KitRecord[] = [];
@@ -223,29 +288,36 @@ export async function getKitById(
   const db = await getActiveDb();
 
   if (db) {
-    const doc = await db.collection("kits").findOne({
-      $or: [{ id: kitId }, { _id: kitId as any }],
-    });
-    if (!doc) return null;
-    // Strict user ownership enforcement
-    if (doc.userId !== userId) {
-      return null;
+    try {
+      const doc = await db.collection("kits").findOne({
+        $or: [{ id: kitId }, { _id: kitId as any }],
+      });
+      if (!doc) return null;
+      // Strict user ownership enforcement
+      if (doc.userId !== userId) {
+        return null;
+      }
+      return {
+        id: doc.id || String(doc._id),
+        userId: doc.userId,
+        title: doc.title,
+        company: doc.company,
+        status: doc.status,
+        kit: doc.kit,
+        pinnedQuestionIds: doc.pinnedQuestionIds || [],
+        customQuestionIds: doc.customQuestionIds || [],
+        editedQuestions: doc.editedQuestions || {},
+        confidenceRatings: doc.confidenceRatings || {},
+        coveredCardIds: doc.coveredCardIds || [],
+        createdAt: doc.createdAt,
+        updatedAt: doc.updatedAt,
+      };
+    } catch (err: any) {
+      throw new RepositoryError(
+        "Failed to query kit from database.",
+        "DATABASE_UNAVAILABLE",
+      );
     }
-    return {
-      id: doc.id || String(doc._id),
-      userId: doc.userId,
-      title: doc.title,
-      company: doc.company,
-      status: doc.status,
-      kit: doc.kit,
-      pinnedQuestionIds: doc.pinnedQuestionIds || [],
-      customQuestionIds: doc.customQuestionIds || [],
-      editedQuestions: doc.editedQuestions || {},
-      confidenceRatings: doc.confidenceRatings || {},
-      coveredCardIds: doc.coveredCardIds || [],
-      createdAt: doc.createdAt,
-      updatedAt: doc.updatedAt,
-    };
   }
 
   const record = fallbackKits.get(kitId);
@@ -265,24 +337,32 @@ export async function updateKit(
   const now = new Date().toISOString();
 
   if (db) {
-    const existing = await db.collection("kits").findOne({
-      $or: [{ id: kitId }, { _id: kitId as any }],
-    });
-    if (!existing || existing.userId !== userId) {
-      return null;
+    try {
+      const existing = await db.collection("kits").findOne({
+        $or: [{ id: kitId }, { _id: kitId as any }],
+      });
+      if (!existing || existing.userId !== userId) {
+        return null;
+      }
+
+      const setPayload: Record<string, any> = {
+        ...update,
+        updatedAt: now,
+      };
+
+      await db.collection("kits").updateOne(
+        { $or: [{ id: kitId }, { _id: kitId as any }] },
+        { $set: setPayload },
+      );
+
+      return getKitById(kitId, userId);
+    } catch (err: any) {
+      if (err instanceof RepositoryError) throw err;
+      throw new RepositoryError(
+        "Failed to update kit in database.",
+        "DATABASE_UNAVAILABLE",
+      );
     }
-
-    const setPayload: Record<string, any> = {
-      ...update,
-      updatedAt: now,
-    };
-
-    await db.collection("kits").updateOne(
-      { $or: [{ id: kitId }, { _id: kitId as any }] },
-      { $set: setPayload },
-    );
-
-    return getKitById(kitId, userId);
   }
 
   const existing = fallbackKits.get(kitId);
@@ -307,13 +387,20 @@ export async function deleteKit(
   const db = await getActiveDb();
 
   if (db) {
-    const result = await db.collection("kits").deleteOne({
-      $and: [
-        { $or: [{ id: kitId }, { _id: kitId as any }] },
-        { userId },
-      ],
-    });
-    return (result.deletedCount ?? 0) > 0;
+    try {
+      const result = await db.collection("kits").deleteOne({
+        $and: [
+          { $or: [{ id: kitId }, { _id: kitId as any }] },
+          { userId },
+        ],
+      });
+      return (result.deletedCount ?? 0) > 0;
+    } catch (err: any) {
+      throw new RepositoryError(
+        "Failed to delete kit from database.",
+        "DATABASE_UNAVAILABLE",
+      );
+    }
   }
 
   const existing = fallbackKits.get(kitId);

@@ -63,11 +63,22 @@ export async function POST(request: NextRequest) {
       },
     );
   } catch (error) {
-    if (error instanceof RepositoryError && error.code === "USER_EXISTS") {
-      return Response.json(
-        { error: error.message, code: "USER_EXISTS" },
-        { status: 409 },
-      );
+    if (error instanceof RepositoryError) {
+      if (error.code === "USER_EXISTS") {
+        return Response.json(
+          { error: error.message, code: "USER_EXISTS" },
+          { status: 409 },
+        );
+      }
+      if (error.code === "DATABASE_UNAVAILABLE") {
+        return Response.json(
+          {
+            error: "Registration service is temporarily unavailable. Please try again shortly.",
+            code: "SERVICE_UNAVAILABLE",
+          },
+          { status: 503 },
+        );
+      }
     }
 
     return Response.json(

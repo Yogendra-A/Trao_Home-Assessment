@@ -23,7 +23,10 @@ export type GeneratedQuestion = z.infer<typeof QuestionSchema> & {
   id: string;
 };
 
-export type QuestionGenerator = (prompt: string) => Promise<unknown>;
+export type QuestionGenerator = (
+  prompt: string,
+  options?: { stage?: string; schema?: z.ZodType<any>; maxTokens?: number },
+) => Promise<unknown>;
 
 export interface ResearchContext {
   companyName?: string;
@@ -36,6 +39,37 @@ function stableId(value: string): string {
     .update(value)
     .digest("hex")
     .slice(0, 12)}`;
+}
+
+export function filterRequirementsForCategory(
+  requirements: ExtractedRequirement[],
+  category: GeneratedQuestion["category"],
+): ExtractedRequirement[] {
+  let filtered: ExtractedRequirement[] = [];
+
+  if (category === "technical") {
+    filtered = requirements.filter(
+      (r) => r.kind === "technical" || r.kind === "domain",
+    );
+  } else if (category === "behavioural") {
+    filtered = requirements.filter((r) => r.kind === "behavioural");
+  } else if (category === "system-design") {
+    filtered = requirements.filter(
+      (r) => r.kind === "technical" || r.kind === "domain",
+    );
+  } else if (category === "company-fit") {
+    filtered = requirements.filter(
+      (r) => r.kind === "domain" || r.priority === "must",
+    );
+  }
+
+  // Fallback to must-haves or all requirements if category filter returned empty
+  if (filtered.length === 0) {
+    const mustHaves = requirements.filter((r) => r.priority === "must");
+    return mustHaves.length > 0 ? mustHaves : requirements;
+  }
+
+  return filtered;
 }
 
 export function buildQuestionPrompt(
@@ -54,37 +88,51 @@ export function buildQuestionPrompt(
   if (researchContext?.companyName) {
     contextLines.push(`Company: ${researchContext.companyName}`);
   }
-  if (researchContext?.hiringEvidence && researchContext.hiringEvidence.length > 0) {
-    contextLines.push(`Discovered Hiring Process: ${researchContext.hiringEvidence.join("; ")}`);
-  }
-  if (researchContext?.techEvidence && researchContext.techEvidence.length > 0) {
-    contextLines.push(`Discovered Technology & Engineering Context: ${researchContext.techEvidence.join("; ")}`);
+
+  // Include only relevant research context for each question category
+  if (category === "technical" || category === "system-design") {
+    if (researchContext?.techEvidence && researchContext.techEvidence.length > 0) {
+      contextLines.push(
+        `Technology Context: ${researchContext.techEvidence.slice(0, 2).join("; ")}`,
+      );
+    }
+  } else if (category === "behavioural" || category === "company-fit") {
+    if (researchContext?.hiringEvidence && researchContext.hiringEvidence.length > 0) {
+      contextLines.push(
+        `Hiring Context: ${researchContext.hiringEvidence.slice(0, 2).join("; ")}`,
+      );
+    }
   }
 
-  const contextSection = contextLines.length > 0
-    ? `\nCOMPANY RESEARCH EVIDENCE:\n${contextLines.join("\n")}\nUse this evidence to tailor questions to this specific company's interview style and engineering environment where relevant. Do not invent unverified company claims.\n`
-    : "";
+  const contextSection =
+    contextLines.length > 0
+      ? `\nCONTEXT:\n${contextLines.join("\n")}\n`
+      : "";
+
+  let categoryGuideline = "";
+  if (category === "technical") {
+    categoryGuideline = "Test technical depth, problem-solving, and practical engineering application.";
+  } else if (category === "behavioural") {
+    categoryGuideline = "Use the STAR method; prompt for specific past experiences, teamwork, and conflict handling.";
+  } else if (category === "system-design") {
+    categoryGuideline = "Test architectural trade-offs, scalability, data modeling, API design, or reliability.";
+  } else if (category === "company-fit") {
+    categoryGuideline = "Focus on company alignment, role motivation, and work environment preferences without inventing facts.";
+  }
 
   return `Generate interview questions for the requirements below.
 
 CATEGORY: ${category}
 ${contextSection}
 Rules:
-- Use only the supplied requirements.
-- Every question must reference one or more supplied requirement IDs.
+- Category Focus: ${categoryGuideline}
+- Every question must reference one or more supplied requirement IDs in "requirement_ids".
 - Set "category": "${category}" for every generated question.
-- Cover all supplied requirements with 1-2 focused questions total.
-- Do not invent company facts, interview stages, skills, or experience.
-- Match the question to the selected category.
-- Technical questions should test relevant engineering knowledge or application.
-- Behavioural questions should ask for specific past examples.
-- System-design questions should test architecture and trade-offs where relevant.
-- Company-fit questions must use only the supplied context; if no company context is provided, focus on role motivation and work preferences without claiming company-specific facts.
-- Provide a concise answer outline without raw unescaped newlines, not a complete scripted answer.
-- Difficulty must be an integer from 1 to 3.
-- Avoid duplicate questions.
-- Return a valid JSON object only in this format:
-{"questions":[{"requirement_ids":["r_example"],"category":"${category}","prompt":"...","answer_outline":"...","difficulty":2}]}
+- Cover the supplied requirements with 1-2 focused, high-signal questions.
+- Provide a substantive answer outline detailing key concepts, trade-offs, or expected response structure (without unescaped newlines).
+- Difficulty must be 1 (introductory), 2 (intermediate), or 3 (advanced).
+- Return valid JSON strictly in this format:
+{"questions":[{"requirement_ids":["r_..."],"category":"${category}","prompt":"...","answer_outline":"...","difficulty":2}]}
 
 REQUIREMENTS:
 ${JSON.stringify(compactRequirements)}`;
@@ -94,30 +142,40 @@ export async function generateQuestions(
   requirements: ExtractedRequirement[],
   generate: QuestionGenerator,
   researchContext?: ResearchContext,
+  categoriesToGenerate?: ReadonlyArray<GeneratedQuestion["category"]>,
 ): Promise<GeneratedQuestion[]> {
   if (requirements.length === 0) return [];
 
   const validIds = new Set(requirements.map((r) => r.id));
-  const categories = [
+  const categories = categoriesToGenerate ?? ([
     "technical",
     "behavioural",
     "system-design",
     "company-fit",
-  ] as const;
+  ] as const);
 
   const allQuestions: GeneratedQuestion[] = [];
   const seen = new Set<string>();
 
-  // Separate calls keep category instructions distinct.
   for (const category of categories) {
+    const relevantRequirements = filterRequirementsForCategory(
+      requirements,
+      category,
+    );
+    if (relevantRequirements.length === 0) continue;
+
     const response = await generate(
-      buildQuestionPrompt(requirements, category, researchContext),
+      buildQuestionPrompt(relevantRequirements, category, researchContext),
+      {
+        stage: `question_generation_${category}`,
+        schema: ResponseSchema,
+        maxTokens: 1800,
+      },
     );
     const parsed = ResponseSchema.parse(response);
 
     for (const question of parsed.questions) {
-      // Normalize category to the category requested in this pass if different
-      const resolvedCategory = question.category === category ? category : category;
+      const resolvedCategory = category;
 
       if (question.requirement_ids.some((id) => !validIds.has(id))) {
         throw new Error("Question references an unknown requirement ID.");

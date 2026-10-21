@@ -117,7 +117,7 @@ export async function runInterviewPrepPipeline(
     throw error;
   }
 
-  // Extract requirements using the existing validated LLM integration.
+  // Extract requirements once using normalized records to avoid prompt bloat.
   const requirements = await generateRequirements(jd);
 
   if (requirements.length === 0) {
@@ -127,11 +127,11 @@ export async function runInterviewPrepPipeline(
   }
 
   const hiringEvidence = (research.findings?.hiringProcessSources ?? [])
-    .map((item) => `${item.title}: ${item.text.slice(0, 250)}`)
-    .slice(0, 3);
+    .map((item) => `${item.title}: ${item.text.slice(0, 200)}`)
+    .slice(0, 2);
   const techEvidence = (research.findings?.engineeringSources ?? [])
-    .map((item) => `${item.title}: ${item.text.slice(0, 250)}`)
-    .slice(0, 3);
+    .map((item) => `${item.title}: ${item.text.slice(0, 200)}`)
+    .slice(0, 2);
 
   // Generate questions and make a bounded second pass for uncovered items,
   // incorporating discovered hiring and tech context.
@@ -162,7 +162,7 @@ export async function runInterviewPrepPipeline(
   const evidenceForPrompt = research.evidence.slice(0, 4).map((item) => ({
     url: item.url,
     title: item.title,
-    text: item.text.slice(0, 600),
+    text: item.text.slice(0, 300),
   }));
 
   const rawBrief = await generateStructuredJson(
@@ -173,6 +173,7 @@ Return JSON with exactly these string fields: summary, what_they_do.
 COMPANY URL: ${companyUrl.toString()}
 WEBSITE EVIDENCE:
 ${JSON.stringify(evidenceForPrompt)}`,
+    { stage: "company_brief", schema: CompanyBriefSchema, maxTokens: 350 },
   );
 
   const rawRole = await generateStructuredJson(
@@ -184,7 +185,8 @@ title (string), seniority (string), location (string),
 responsibilities (array of strings).
 
 JOB DESCRIPTION:
-${jd.slice(0, 4_000)}`,
+${jd.slice(0, 2_000)}`,
+    { stage: "role_metadata", schema: RoleMetadataSchema, maxTokens: 800 },
   );
 
   const brief = CompanyBriefSchema.parse(rawBrief);

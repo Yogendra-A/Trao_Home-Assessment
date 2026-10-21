@@ -5,7 +5,10 @@ import {
   createSessionToken,
   getSessionCookieHeader,
 } from "../../../../../server/src/auth/session";
-import { findUserByEmail } from "../../../../../server/src/db/repository";
+import {
+  findUserByEmail,
+  RepositoryError,
+} from "../../../../../server/src/db/repository";
 
 const LoginSchema = z.object({
   email: z.string().email("Please provide a valid email address."),
@@ -70,7 +73,17 @@ export async function POST(request: NextRequest) {
         },
       },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof RepositoryError && error.code === "DATABASE_UNAVAILABLE") {
+      return Response.json(
+        {
+          error: "Authentication service is temporarily unavailable. Please try again shortly.",
+          code: "SERVICE_UNAVAILABLE",
+        },
+        { status: 503 },
+      );
+    }
+
     return Response.json(
       { error: "Login failed. Please try again.", code: "INTERNAL_ERROR" },
       { status: 500 },
