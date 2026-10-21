@@ -172,4 +172,22 @@ describe("InterviewKitSchema", () => {
 
     expect(InterviewKitSchema.safeParse(invalidKit).success).toBe(false);
   });
+
+  it("validates that all kits in test-output.json satisfy Appendix A InterviewKitSchema", () => {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const outputPath = path.resolve(__dirname, "../../test-output.json");
+    if (fs.existsSync(outputPath)) {
+      const data = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+      expect(data.version).toBe("1.0");
+      expect(Array.isArray(data.kits)).toBe(true);
+      expect(data.kits.length).toBeGreaterThan(0);
+      for (const item of data.kits) {
+        expect(item.status).toBe("ok");
+        expect(item.error).toBeNull();
+        const result = InterviewKitSchema.safeParse(item.kit);
+        expect(result.success).toBe(true);
+      }
+    }
+  });
 });

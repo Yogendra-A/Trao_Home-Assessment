@@ -10,6 +10,10 @@ import { runInterviewPrepPipeline } from "../../../../server/src/pipeline/run";
 import { KitGenerationRequestSchema } from "../../../../shared/schemas/kit";
 import { toPipelineErrorResponse } from "../../../../server/src/pipeline/error-response";
 
+// Maximum execution duration supported across all Vercel plans without assuming Pro/Fluid Compute.
+// Can be adjusted to 300s when deploying to confirmed Pro/Fluid Compute plans.
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const session = getSessionFromRequest(request);
   if (!session) {

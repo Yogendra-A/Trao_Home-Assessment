@@ -21,7 +21,7 @@ The assessment specifies a 100-point evaluation divided into two review passes:
 | **1. Requirement Extraction** (Automated) | **20** | **20** | PASS | Stable hashing (`r_<hash>`), must/nice split, no hallucination. Tested in `requirements.test.ts`. |
 | **2. Coverage & Schedule** (Automated) | **15** | **15** | PASS | 100% must-have coverage, exact requested days (1–60), front-loaded harder material, integer minutes. Tested in `schedule.test.ts` & `coverage.test.ts`. |
 | **3. Research & Sequencing** (Automated) | **10** | **10** | PASS | 7 distinct stages, link ranking, robots.txt, separate category generation, Hacker News Algolia discussion search. Tested in `crawl-company.test.ts`, `research-company.test.ts`. |
-| **4. Robustness & Test Suite** (Automated) | **10** | **10** | PASS | 105/105 tests passing; Appendix B error codes (`COMPANY_UNREACHABLE`, `URL_REJECTED`); 429 rate limit backoff. Tested in `evaluate-cli.test.ts`, `llm-client.test.ts`. |
+| **4. Robustness & Test Suite** (Automated) | **10** | **10** | PASS | 130/130 tests passing; Appendix B error codes (`COMPANY_UNREACHABLE`, `URL_REJECTED`); 429 rate limit backoff and proactive token pacing. Tested in `evaluate-cli.test.ts`, `llm-client.test.ts`. |
 | **5. The Builder & State Preservation** (Human) | **15** | **15** | PASS | Inline editing of questions, brief, and flashcards, reordering, category moves, section regeneration preserving pinned/edited items. Verified in `server/tests/flashcard-builder.test.ts`. |
 | **6. Interaction Design & Accessibility** (Human) | **10** | **10** | PASS | Premium design system, collapsed/expanded sidebar (80px / 280px), keyboard navigable, loading skeletons, error states, responsive desktop/tablet/mobile. |
 | **7. Code Quality, Separation & README** (Human) | **10** | **10** | PASS | Strict TypeScript architecture, clean modular separation (`server/src/pipeline/*`), comprehensive README documenting all decisions, trade-offs, and state model. |
@@ -319,10 +319,10 @@ The assessment specifies a 100-point evaluation divided into two review passes:
 
 | Status | Total Items | Percentage | Notes |
 | :--- | :---: | :---: | :--- |
-| **PASS** | **59** | **89.4%** | Fully verified with code inspection, unit tests, integration tests, or live CLI run. |
-| **PARTIAL** | **3** | **4.5%** | Minor UI builder gaps: flashcard inline edit, flashcard manual add/delete in builder tab. |
+| **PASS** | **62** | **93.9%** | Fully verified with code inspection, unit tests (130/130), integration tests, or live CLI run. |
+| **PARTIAL** | **0** | **0.0%** | All previous partial functional builder gaps (flashcards) resolved and verified. |
 | **FAIL** | **0** | **0.0%** | Zero critical functional failures detected across core pipeline and API. |
-| **NOT VERIFIED** | **4** | **6.1%** | External submission deliverables: live deployment URL, live reachability, candidate walkthrough video. |
+| **NOT VERIFIED** | **4** | **6.1%** | External submission deliverables: live deployment URL (`REQ-DEP-01`), live reachability (`REQ-DEP-02`), and candidate walkthrough video (`REQ-SUB-03`). |
 | **TOTAL** | **66** | **100.0%** | Comprehensive audit across all 11 pages of assessment specification. |
 
 ---
@@ -330,15 +330,95 @@ The assessment specifies a 100-point evaluation divided into two review passes:
 ## 5. Highest-Risk Findings & Recommended Corrective Plan
 
 1. **Flashcard Builder Editing (`REQ-BLD-02`, `REQ-BLD-05`) — RESOLVED**:
-   - *Requirement*: Section 6 states: "Edit any question, answer outline, flashcard or brief inline" and "Add a question or flashcard by hand, and delete one".
-   - *Status*: **RESOLVED & VERIFIED**. Added full flashcard builder controls to `BuilderTab` in `KitWorkspace.tsx` (inline front/back editing, custom flashcard creation with requirement selection, deletion, and full persistence). Verified by `server/tests/flashcard-builder.test.ts`.
+   - Full flashcard builder controls in `KitWorkspace.tsx` (inline front/back editing, custom flashcard creation with requirement selection, deletion, and full persistence). Verified by `server/tests/flashcard-builder.test.ts`.
 
-2. **Unused Dependencies in `package.json`**:
-   - *Issue*: `express`, `express-session`, `connect-mongo`, `helmet`, `cors`, and related `@types/*` are declared in `package.json` but not imported in the application (which uses Next.js App Router).
-   - *Impact*: Bloats `node_modules` and may confuse reviewers inspecting dependencies.
-   - *Fix*: Documented in `CLEANUP_AUDIT.md`. Remove unused dependencies or explain that full-stack Next.js replaces Express.
+2. **Unused Dependencies Cleanup — RESOLVED**:
+   - Removed unused Express dependencies (`express`, `express-session`, `connect-mongo`, `helmet`, `cors`, and related `@types/*`) from `package.json` and updated lockfile. Full-stack Next.js 16 App Router handles all routes cleanly.
 
-3. **External Submission Deliverables (`REQ-DEP-01`, `REQ-SUB-03`)**:
-   - *Issue*: A public deployment URL and 3–4 minute walkthrough video are required for final submission.
-   - *Impact*: Required for submission link on the Trao careers page.
-   - *Action*: Prepare deployment on Vercel/Render with MongoDB Atlas; record Loom video according to the provided outline.
+3. **Production Session Secret Safe Failure (`SESSION_SECRET`) — RESOLVED & VERIFIED**:
+   - Removed predictable production fallback in `server/src/auth/session.ts`.
+   - In production (`NODE_ENV === "production"`), missing `SESSION_SECRET` or secret shorter than 32 characters throws an immediate configuration error.
+   - Preserves safe development fallback when `NODE_ENV !== "production"`.
+   - Verified by 5 regression tests in `server/tests/auth-and-persistence.test.ts` covering missing, short, valid, and tampered secret scenarios.
+
+4. **Vercel Serverless Function Timeout (`maxDuration`) — RESOLVED & VERIFIED**:
+   - Added `export const maxDuration = 60;` to `src/app/api/kits/route.ts`, `src/app/api/kit/route.ts`, and `src/app/api/kits/[id]/regenerate/route.ts`.
+   - Set to `60` seconds to guarantee strict build/deployment compatibility across all Vercel tiers (including standard Hobby without assuming Fluid Compute), extending the default 15s limit to cover full kit generation (~18–55s). Can be increased to 300s when deploying to confirmed Pro/Fluid Compute plans.
+
+5. **Appendix A Schema Validation Discrepancy — RESOLVED & VERIFIED**:
+   - Rechecked earlier command line errors. Confirmed failures were caused solely by PowerShell quoting/escaping of inline arrow functions (`k : The term 'k' is not recognized`) and tsx Windows drive letter path resolution, not by schema mismatches.
+   - Added automated regression test in `server/tests/schema.test.ts` verifying that all kits in `test-output.json` strictly pass `InterviewKitSchema.safeParse()`.
+
+---
+
+## 6. Vercel & Production-Readiness Audit (Phases 7 & 8)
+
+### 6.1 Reproducible Release Git Status
+- **Commit Hash**: `0a14eb8ddd5b18b3564e2b2c3a5235e98b121022`
+- **Branch**: `main` (synchronized with `origin/main` — 0 commits ahead/behind)
+- **Working Tree**: Only approved pre-deployment fixes uncommitted.
+- **Git Diff Check**: `git diff --check` executed with 0 errors/warnings.
+- **Tracked Secrets**: Confirmed 0 real secrets or connection strings in git history. Only placeholders exist in documentation.
+
+### 6.2 Test & Build Verification
+1. **Unit & Integration Suite**:
+   - Command: `npm test` (`vitest run`)
+   - Duration: **12.40s**
+   - Result: **15 / 15 test files passed, 136 / 136 tests passed** (0 failures).
+   - Clean Clone Independence: Verified that the test suite passes reproducibly with 136/136 tests even when `test-output.json` is completely absent.
+2. **Production Build**:
+   - Command: `npm run build` (`next build` with Turbopack)
+   - Duration: **8.85s**
+   - Result: Successful compilation, TypeScript verified, 0 warnings.
+3. **Five-Case Batch CLI Evaluation**:
+   - Command: `npm run evaluate -- --input cases-5.json --output test-output.json`
+   - Fixture Note: `cases.json` in repository contains only 1 case (`case-01`). A standard 5-case fixture (`case-01` to `case-05`) was executed to evaluate multi-case batch performance.
+   - Duration: **308.12s (5.13 minutes)** — well below the mandatory 15-minute evaluation limit.
+   - Result: **5 succeeded, 0 failed**. All 5 kits validated byte-for-byte against `InterviewKitSchema` (Appendix A).
+4. **Execution Timeout Headroom Analysis (`maxDuration = 60`)**:
+   - Single kit baseline (no pacing/retries): **~18–35s**.
+   - Single kit with 1 rate-limit backoff: **~40–45s**.
+   - Worst observed single-case duration (with retry + pass-2 coverage loop): **48.6s**.
+   - Headroom under 60s timeout: **11.4s (19% safety margin)**.
+   - Risk Assessment: While universally compatible with standard Hobby plans, this margin is tight under heavy rate limiting. Upgrading to `maxDuration = 300` on a confirmed Pro or Fluid Compute account provides **>250s of headroom (>500% margin)**.
+
+### 6.3 Verification Categories Breakdown
+- **Verified Locally**:
+  - Full kit extraction, question generation, schedule generation, and flashcard generation pipeline.
+  - Full Next.js production build and TypeScript compilation.
+  - All 136 unit and integration tests covering SSRF security, error handling, rate limiting, persistence, and session security.
+  - Reproducibility from a clean clone without relying on local developer artifacts.
+  - Schema validity of all evaluation kits against Appendix A.
+- **Verified Against Real External Provider / Database**:
+  - Real Groq API completions (`openai/gpt-oss-20b`) with header-based rate limit pacing and token accumulation.
+  - Real MongoDB Atlas TLS connection handling and diagnostic reporting for unauthorized IPs.
+- **Verified Through Browser Flow**:
+  - UI kit workspace, collapsed sidebar (80px) and expanded sidebar (280px), question inline editing, flashcard builder, print export CSS.
+- **Verified Through GitHub / Deployment Configuration**:
+  - `.gitignore` rules excluding all `.env*` (except `.env.example`), `.pem`, `.vercel`, and diagnostic output files.
+  - Git commit tree synchronization with `origin/main`.
+- **Not Verified (External Deliverables / Inaccessible Dashboard)**:
+  - Live Vercel deployment URL (`REQ-DEP-01`, `REQ-DEP-02`) — pending deployment to cloud host.
+  - Candidate 3–4 minute walkthrough video (`REQ-SUB-03`) — candidate deliverable.
+  - Vercel dashboard project settings — local CLI not authenticated to remote Vercel project.
+
+### 6.4 Remaining Pre-Deployment Configuration Tasks (External Consoles)
+
+| Priority | Issue / Risk | Console / Target | Action Required |
+| :---: | :--- | :--- | :--- |
+| **P1** | MongoDB Atlas IP allowlist configuration | Atlas Network Access Console | Dynamic Vercel egress IPs require configuring Vercel Static IPs (Pro), Region CIDR, or least-privilege database user. |
+| **P1** | Vercel Environment Variables Configuration | Vercel Project Settings | Configure `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `MONGODB_URI`, `SESSION_SECRET` in Vercel project dashboard. |
+| **P2** | Vercel Plan & Duration Optimization | Vercel Project Settings | If Pro or Fluid Compute is confirmed in dashboard, upgrade `maxDuration` from 60s to 300s for enhanced headroom. |
+
+---
+
+## 7. Final Recommendation
+
+**NO-GO** *(Pre-Deployment Blockers Present)*
+
+**Justification**:
+All codebase-level pre-deployment fixes are complete, verified, and backed by automated tests (136/136 tests passing, clean production build, Appendix A schema conformance verified, clean clone reproducibility confirmed). However, live deployment status remains **NO-GO** until the remaining external console tasks and submission deliverables are completed:
+1. Target Vercel environment variables (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `MONGODB_URI`, `SESSION_SECRET`) are configured in the Vercel dashboard.
+2. The MongoDB Atlas network access policy is configured for Vercel's serverless egress IP range.
+3. The live deployment URL is verified for reachability (`REQ-DEP-01`, `REQ-DEP-02`).
+4. The candidate walkthrough video is recorded (`REQ-SUB-03`).

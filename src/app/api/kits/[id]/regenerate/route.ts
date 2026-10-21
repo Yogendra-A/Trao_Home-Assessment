@@ -7,6 +7,10 @@ import { generateQuestions } from "../../../../../../server/src/pipeline/questio
 import { allocateSchedule } from "../../../../../../server/src/pipeline/generation/schedule";
 import type { Question } from "../../../../../../shared/schemas/kit";
 
+// Maximum execution duration supported across all Vercel plans without assuming Pro/Fluid Compute.
+// Can be adjusted to 300s when deploying to confirmed Pro/Fluid Compute plans.
+export const maxDuration = 60;
+
 const RegenerateRequestSchema = z.object({
   section: z.enum(["brief", "category", "schedule"]),
   category: z.enum(["technical", "behavioural", "system-design", "company-fit"]).optional(),

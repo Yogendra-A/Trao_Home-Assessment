@@ -6,6 +6,7 @@ import {
   createSessionToken,
   verifyToken,
   signToken,
+  getSessionSecret,
   getSessionCookieHeader,
 } from "../src/auth/session";
 import {
@@ -134,6 +135,101 @@ describe("Authentication & Session Security", () => {
     });
 
     expect(verifyToken(expiredToken)).toBeNull();
+  });
+
+  describe("SESSION_SECRET production validation & safe development fallback", () => {
+    const originalEnv = process.env.NODE_ENV;
+    const originalSecret = process.env.SESSION_SECRET;
+
+    it("throws when SESSION_SECRET is missing in production", () => {
+      try {
+        (process.env as any).NODE_ENV = "production";
+        delete process.env.SESSION_SECRET;
+
+        expect(() => getSessionSecret()).toThrow(
+          "SESSION_SECRET environment variable is required in production.",
+        );
+        expect(() => signToken({ userId: "u1", iat: 100, exp: 200 })).toThrow(
+          "SESSION_SECRET environment variable is required in production.",
+        );
+      } finally {
+        (process.env as any).NODE_ENV = originalEnv;
+        if (originalSecret !== undefined) process.env.SESSION_SECRET = originalSecret;
+        else delete process.env.SESSION_SECRET;
+      }
+    });
+
+    it("throws when SESSION_SECRET is shorter than 32 characters in production", () => {
+      try {
+        (process.env as any).NODE_ENV = "production";
+        process.env.SESSION_SECRET = "too-short-secret-only-25c";
+
+        expect(() => getSessionSecret()).toThrow(
+          "SESSION_SECRET must be at least 32 characters long in production.",
+        );
+        expect(() => signToken({ userId: "u1", iat: 100, exp: 200 })).toThrow(
+          "SESSION_SECRET must be at least 32 characters long in production.",
+        );
+      } finally {
+        (process.env as any).NODE_ENV = originalEnv;
+        if (originalSecret !== undefined) process.env.SESSION_SECRET = originalSecret;
+        else delete process.env.SESSION_SECRET;
+      }
+    });
+
+    it("accepts valid SESSION_SECRET (>= 32 characters) in production", () => {
+      try {
+        (process.env as any).NODE_ENV = "production";
+        const strongSecret = "a".repeat(32);
+        process.env.SESSION_SECRET = strongSecret;
+
+        expect(getSessionSecret()).toBe(strongSecret);
+        const token = signToken({ userId: "u_prod_valid", iat: 1000, exp: Date.now() / 1000 + 3600 });
+        const payload = verifyToken(token);
+        expect(payload?.userId).toBe("u_prod_valid");
+      } finally {
+        (process.env as any).NODE_ENV = originalEnv;
+        if (originalSecret !== undefined) process.env.SESSION_SECRET = originalSecret;
+        else delete process.env.SESSION_SECRET;
+      }
+    });
+
+    it("preserves safe fallback in local development and test when secret is absent", () => {
+      try {
+        (process.env as any).NODE_ENV = "development";
+        delete process.env.SESSION_SECRET;
+
+        const secret = getSessionSecret();
+        expect(secret).toBe("trao-default-secret-change-in-production-min-32-chars");
+
+        const token = signToken({ userId: "u_dev", iat: 1000, exp: Date.now() / 1000 + 3600 });
+        const payload = verifyToken(token);
+        expect(payload?.userId).toBe("u_dev");
+      } finally {
+        (process.env as any).NODE_ENV = originalEnv;
+        if (originalSecret !== undefined) process.env.SESSION_SECRET = originalSecret;
+        else delete process.env.SESSION_SECRET;
+      }
+    });
+
+    it("correctly signs and verifies tokens using configured custom secret", () => {
+      try {
+        const customSecret = "custom-development-secret-for-testing-purposes-123";
+        process.env.SESSION_SECRET = customSecret;
+
+        const token = signToken({ userId: "u_custom", iat: 1000, exp: Date.now() / 1000 + 3600 });
+        const payload = verifyToken(token);
+        expect(payload?.userId).toBe("u_custom");
+
+        // Verifying with a different secret should reject signature
+        process.env.SESSION_SECRET = "another-different-valid-secret-key-456789";
+        expect(verifyToken(token)).toBeNull();
+      } finally {
+        (process.env as any).NODE_ENV = originalEnv;
+        if (originalSecret !== undefined) process.env.SESSION_SECRET = originalSecret;
+        else delete process.env.SESSION_SECRET;
+      }
+    });
   });
 });
 
